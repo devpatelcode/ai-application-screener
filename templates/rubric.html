@@ -1,0 +1,183 @@
+{% extends "base.html" %}
+{% block title %}Rubric - Resume Screener{% endblock %}
+{% block content %}
+<div class="container">
+    <h1>Scoring Rubric</h1>
+    <p class="subtitle">Adjust the weight of each category. Weights must sum to 100. GPA is a separate eligibility gate and does not count toward the 100%.</p>
+
+    <div class="rubric-container">
+        <div class="rubric-form">
+            <div class="rubric-field">
+                <label for="motivation">Motivation & Fit</label>
+                <div class="slider-container">
+                    <input type="range" id="motivation" min="0" max="100" value="25" oninput="updateWeights()">
+                    <span id="motivationVal" class="slider-value">25%</span>
+                </div>
+                <p class="description">Why they want to join the club — genuine, specific motivation</p>
+            </div>
+
+            <div class="rubric-field">
+                <label for="collaboration">Collaboration & Perspective-Taking</label>
+                <div class="slider-container">
+                    <input type="range" id="collaboration" min="0" max="100" value="25" oninput="updateWeights()">
+                    <span id="collaborationVal" class="slider-value">25%</span>
+                </div>
+                <p class="description">Working with people whose perspectives differed from their own</p>
+            </div>
+
+            <div class="rubric-field">
+                <label for="values">Values & Judgment</label>
+                <div class="slider-container">
+                    <input type="range" id="values" min="0" max="100" value="25" oninput="updateWeights()">
+                    <span id="valuesVal" class="slider-value">25%</span>
+                </div>
+                <p class="description">A value that guides their decisions, and evidence of acting on it</p>
+            </div>
+
+            <div class="rubric-field">
+                <label for="commitments">Commitments, Leadership & Experience</label>
+                <div class="slider-container">
+                    <input type="range" id="commitments" min="0" max="100" value="25" oninput="updateWeights()">
+                    <span id="commitmentsVal" class="slider-value">25%</span>
+                </div>
+                <p class="description">Extracurriculars, jobs, volunteering, and resume experience/leadership</p>
+            </div>
+
+            <div class="total-weight">
+                <span>Total:</span>
+                <span id="totalWeight" class="weight-value">100%</span>
+            </div>
+
+            <div class="rubric-field" style="margin-top: 1.5rem; border-top: 1px solid #eee; padding-top: 1.5rem;">
+                <label for="gpaThreshold">Minimum GPA (eligibility gate, not a weight)</label>
+                <div class="slider-container">
+                    <input type="number" id="gpaThreshold" min="0" max="4" step="0.01" value="2.5" oninput="document.getElementById('gpaThresholdVal').textContent = this.value">
+                    <span id="gpaThresholdVal" class="slider-value">2.5</span>
+                </div>
+                <p class="description">Candidates below this GPA are flagged as ineligible; GPA never affects the score itself</p>
+            </div>
+        </div>
+
+        <div class="preset-section">
+            <h3>Presets</h3>
+            <div class="preset-buttons">
+                <button class="btn" onclick="loadPreset('balanced')">Balanced</button>
+                <button class="btn" onclick="loadPreset('fit_focus')">Motivation Focus</button>
+                <button class="btn" onclick="loadPreset('experience_focus')">Experience Focus</button>
+            </div>
+            <div class="save-preset">
+                <input type="text" id="presetName" placeholder="Preset name">
+                <button class="btn primary" onclick="savePreset()">Save Preset</button>
+            </div>
+            <div id="presetList" class="preset-list"></div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const defaults = {
+    motivation: 25,
+    collaboration: 25,
+    values: 25,
+    commitments: 25,
+};
+
+const presets = {
+    balanced: { motivation: 25, collaboration: 25, values: 25, commitments: 25 },
+    fit_focus: { motivation: 40, collaboration: 20, values: 20, commitments: 20 },
+    experience_focus: { motivation: 15, collaboration: 20, values: 15, commitments: 50 },
+};
+
+function updateWeights() {
+    const ids = ['motivation', 'collaboration', 'values', 'commitments'];
+    let total = 0;
+
+    ids.forEach(id => {
+        const val = parseInt(document.getElementById(id).value);
+        document.getElementById(id + 'Val').textContent = val + '%';
+        total += val;
+    });
+
+    const totalEl = document.getElementById('totalWeight');
+    totalEl.textContent = total + '%';
+    totalEl.className = 'weight-value' + (total === 100 ? ' valid' : ' invalid');
+}
+
+function loadPreset(name) {
+    const preset = presets[name];
+    if (!preset) return;
+
+    document.getElementById('motivation').value = preset.motivation;
+    document.getElementById('collaboration').value = preset.collaboration;
+    document.getElementById('values').value = preset.values;
+    document.getElementById('commitments').value = preset.commitments;
+    updateWeights();
+}
+
+async function savePreset() {
+    const name = document.getElementById('presetName').value.trim();
+    if (!name) {
+        alert('Please enter a preset name');
+        return;
+    }
+
+    const config = {
+        motivation_fit: parseInt(document.getElementById('motivation').value),
+        collaboration_perspective: parseInt(document.getElementById('collaboration').value),
+        values_judgment: parseInt(document.getElementById('values').value),
+        commitments_experience: parseInt(document.getElementById('commitments').value),
+        gpa_threshold: parseFloat(document.getElementById('gpaThreshold').value),
+    };
+
+    try {
+        await fetch(`/rubric/preset/${encodeURIComponent(name)}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(config),
+        });
+        document.getElementById('presetName').value = '';
+        loadPresets();
+    } catch (error) {
+        alert('Failed to save preset');
+    }
+}
+
+async function loadPresets() {
+    try {
+        const response = await fetch('/rubric/presets');
+        const data = await response.json();
+        const list = document.getElementById('presetList');
+        list.innerHTML = data.presets.map(p => `
+            <div class="preset-item">
+                <span>${p}</span>
+                <button class="btn small" onclick="loadCustomPreset('${p}')">Load</button>
+            </div>
+        `).join('');
+    } catch (error) {
+        console.error('Failed to load presets');
+    }
+}
+
+async function loadCustomPreset(name) {
+    try {
+        const response = await fetch(`/rubric/preset/${encodeURIComponent(name)}`);
+        const config = await response.json();
+
+        document.getElementById('motivation').value = config.motivation_fit ?? 25;
+        document.getElementById('collaboration').value = config.collaboration_perspective ?? 25;
+        document.getElementById('values').value = config.values_judgment ?? 25;
+        document.getElementById('commitments').value = config.commitments_experience ?? 25;
+        document.getElementById('gpaThreshold').value = config.gpa_threshold ?? 2.5;
+        document.getElementById('gpaThresholdVal').textContent = document.getElementById('gpaThreshold').value;
+        updateWeights();
+    } catch (error) {
+        alert('Failed to load preset');
+    }
+}
+
+updateWeights();
+loadPresets();
+</script>
+{% endblock %}

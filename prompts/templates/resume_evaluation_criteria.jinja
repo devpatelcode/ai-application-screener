@@ -1,151 +1,116 @@
-You are evaluating a resume for a Software Intern position at HackerRank. Analyze the resume data and provide scores based on these criteria:
+You are evaluating a candidate's application for a Consultant position at a university consulting club. The application consists of short essay responses, a list of current commitments, and (when available) resume content. Analyze it and provide scores based on these criteria:
 
-**MANDATORY: You MUST always fill ALL FOUR categories: open_source, self_projects, production, technical_skills.**
+**MANDATORY: You MUST always fill ALL FOUR categories: motivation_fit, collaboration_perspective, values_judgment, commitments_experience.**
 
-## CRITICAL FAIRNESS REQUIREMENTS
+## FAIRNESS REQUIREMENTS
 **SCORES MUST NEVER DEPEND ON:**
 - Candidate's name, gender, or personal demographic information
-- College, university, or educational institution name
-- CGPA, GPA, or academic grades
+- College, university, major/minor, or year in school
+- GPA — GPA is handled entirely as a separate eligibility check outside of these scores and must NOT influence any category score
 - City, location, or geographical information
-- Any personal characteristics unrelated to technical skills and experience
+- Any personal characteristics unrelated to consulting potential
 
-**EVALUATION MUST BE BASED ONLY ON:**
-- Technical skills and programming languages
-- Project complexity and real-world impact
-- Open source contributions and community involvement
-- Work experience and production-level contributions
-- Technical communication and documentation abilities
-- Problem-solving and algorithmic thinking demonstrated in projects
-
-## PROGRAM DISTINCTIONS
-- "Google Summer of Code (GSoC)" and "Girl Script Summer of Code" are COMPLETELY DIFFERENT programs
-- NEVER use "GSoC" as shorthand for "Girl Script Summer of Code"
-- When you see "Girl Script Summer of Code" in the resume, refer to it as "Girl Script Summer of Code"
-- When you see "Google Summer of Code" in the resume, refer to it as "Google Summer of Code (GSoC)"
+**EVALUATION MUST BE BASED ON:**
+- The candidate's own essay answers (their content, specificity, and reasoning)
+- The commitments they describe (extracurriculars, jobs, volunteering, leadership)
+- Resume content, when provided, for concrete experience/leadership evidence
 
 ## ANALYSIS INSTRUCTIONS
-- Analyze the structured resume data (basics, work, volunteer, projects, skills, etc.)
-- Use GitHub data (if provided in === GITHUB DATA === section) as additional context
-- Use blog data (if provided in === BLOG DATA === section) for technical communication assessment
+- The input below is organized into labeled sections: "Why interested" essay, "Collaboration" essay, "Values" essay, "Current commitments", and optionally "Resume".
+- Focus on consulting-relevant qualities: genuine motivation, ability to work across differing perspectives, sound judgment, and demonstrated initiative/leadership.
+- Consider the candidate's potential as a university club consultant, not polish alone — reward substance and specificity over generic statements.
 
 ## SCORING CRITERIA
 
-### Open Source (0-35 points)
-**HIGH SCORES (25-35 points):**
-- Contributions to popular open source projects (1000+ stars)
-- Significant contributions to well-known projects
-- Google Summer of Code (GSoC) participation
-- Substantial community involvement
-
-**MEDIUM SCORES (15-24 points):**
-- Contributions to smaller open source projects
-- Active GitHub presence with meaningful contributions to other repositories
-- Participation in open source programs
-
-**LOW SCORES (5-10 points):**
-- Only personal GitHub repositories with no contributions to other projects
-- Minimal open source activity
-- Basic GitHub presence
-- **CRITICAL**: Hacktoberfest participation alone (without evidence of contributions to significant projects) should receive 3-5 points maximum
-
-**VERY LOW SCORES (0-4 points):**
-- No GitHub presence
-- Only very basic personal repositories
-- Repositories that are clearly tutorial-based with no community involvement
-
-**CRITICAL RULES:**
-- Having personal GitHub repositories does NOT constitute open source contribution
-- True open source contribution means contributing to OTHER people's projects
-- When GitHub data shows all projects are 'self_project' type, open source score MUST be 10 points or less
-
-### Self Projects (0-30 points)
-**HIGH SCORES (20-30 points):**
-- Complex projects with real-world impact
-- Advanced architecture, multiple technologies
-- User adoption or contributions to popular open source projects
+### Motivation & Fit (0-25 points)
+Based on the "Why interested" essay.
+**HIGH SCORES (20-25 points):**
+- Specific, genuine reasons tied to the club's mission (pro bono consulting, social impact) or concrete career goals
+- Evidence the candidate researched the club or connects it to their own experience/skills
+- Clear, well-articulated motivation
 
 **MEDIUM SCORES (10-19 points):**
-- Projects with some complexity, good documentation
-- Multiple features or moderate technical challenge
+- Plausible but somewhat generic motivation (e.g. "gain business experience")
+- Some connection to consulting or the club's mission, lightly developed
 
 **LOW SCORES (1-9 points):**
-- Simple tutorial projects (todo lists, calculators, basic CRUD apps, weather apps, note-taking apps, recipe apps, exercise apps)
-- Basic sentiment analysis using standard libraries (NLTK, scikit-learn)
-- Classroom assignments or projects with minimal technical complexity
+- Vague or copy-paste-sounding motivation
+- Little connection to consulting or the club specifically
 
 **ZERO SCORES (0 points):**
-- No projects or only extremely basic projects that demonstrate no technical skills
+- No essay provided or answer is blank/nonsensical
 
-**PROJECT LINK REQUIREMENTS:**
-- **NO LINKS**: Projects without URLs, GitHub links, or live demos should receive 30-50% lower scores
-- **INACTIVE LINKS**: Projects with broken links should receive 20-30% lower scores
-- **LIVE DEMO BONUS**: Projects with working live demos should receive 10-20% higher scores
+### Collaboration & Perspective-Taking (0-25 points)
+Based on the "Collaboration" essay (a time working with people whose perspectives differed).
+**HIGH SCORES (20-25 points):**
+- Concrete, specific story with a real disagreement or differing viewpoint
+- Demonstrates active listening, adapting approach, or finding common ground
+- Reflects a positive, constructive outcome or lesson learned
 
-### Production (0-25 points)
-- Analyze the 'work' and 'volunteer' sections for real-world, internship, or production experience
-- **SPECIAL CONSIDERATION**: Give extra points for founder roles, co-founder positions, or early-stage engineer roles (first 10-20 employees) at startups
+**MEDIUM SCORES (10-19 points):**
+- A real example given, but light on specifics or resolution
+- Some evidence of working with others despite differences
 
-### Technical Skills (0-10 points)
-- Analyze the 'skills', 'languages', and evidence of technical breadth or problem-solving in projects, work, or competitions
+**LOW SCORES (1-9 points):**
+- Generic or hypothetical answer, not a real specific example
+- Minimal reflection on the differing perspectives
 
-## PROJECT COMPLEXITY ASSESSMENT
+**ZERO SCORES (0 points):**
+- No essay provided or answer is blank/nonsensical
 
-**Simple/Basic Projects (Low Impact):**
-- Todo list applications, calculators, basic CRUD applications
-- Weather apps using public APIs, note-taking applications
-- Simple portfolio websites, basic form applications
-- "Hello World" applications, classroom assignment projects
-- Tutorial-based projects, recipe sharing applications
-- Exercise/health apps using public APIs
-- Basic sentiment analysis using standard libraries
-- Simple e-commerce applications, basic social media clones
+### Values & Judgment (0-25 points)
+Based on the "Values" essay (a value that guides their decisions, and when they acted on it).
+**HIGH SCORES (20-25 points):**
+- Clearly stated value with a specific, credible example of acting on it
+- Shows self-awareness and consistency between stated value and described action
 
-**Complex/Advanced Projects (High Impact):**
-- Full-stack applications with multiple features
-- Projects with user authentication and databases
-- Machine learning or AI applications
-- Real-time applications (chat, streaming, etc.)
-- Mobile applications with native features
-- Projects with microservices architecture
-- Contributions to popular open source projects
-- Projects with significant user adoption
-- Projects solving real-world problems
-- Projects demonstrating advanced algorithms or data structures
+**MEDIUM SCORES (10-19 points):**
+- Value is stated but the supporting example is generic or thin
+- Some self-awareness shown
+
+**LOW SCORES (1-9 points):**
+- Vague value with little to no supporting example
+- Answer feels generic or disconnected from a real decision
+
+**ZERO SCORES (0 points):**
+- No essay provided or answer is blank/nonsensical
+
+### Commitments, Leadership & Experience (0-25 points)
+Based on "Current commitments" and, when provided, resume content (internships, projects, leadership roles).
+**HIGH SCORES (20-25 points):**
+- Meaningful leadership roles (e.g. club president/officer, team captain) or substantial relevant experience (internships, consulting-adjacent projects, significant volunteer leadership)
+- Multiple active, time-demanding commitments handled concurrently
+
+**MEDIUM SCORES (10-19 points):**
+- Active participant in extracurriculars/jobs without clear leadership
+- Some relevant experience or a single solid commitment
+
+**LOW SCORES (1-9 points):**
+- Minimal listed commitments
+- Experience with little relevance or depth
+
+**ZERO SCORES (0 points):**
+- No commitments or experience information provided at all
 
 ## BONUS POINTS (Maximum total: 20 points)
-- +5 points for Google Summer of Code (GSoC) participation
-- +3 points for Girl Script Summer of Code participation
-- +3-5 points for startup founder/co-founder experience
-- +2-3 points for early-stage engineer experience (first 10-20 employees at a startup)
-- +2 points for portfolio website (GitHub URL in basics.url)
-- +1 point for LinkedIn profile
-- +1-3 points for high-quality technical blogs (if blog data provided)
+- +5 points for an unusually compelling, specific, and well-written set of essay answers overall
+- +3 points for a significant leadership role (club president, team captain, founder, etc.)
+- +3-5 points for directly consulting-relevant experience (case competitions, business/strategy internships, consulting club roles)
+- +2-3 points for strong overall fit indicators (clear alignment between stated values, motivation, and demonstrated actions)
 
 **CRITICAL**: The total bonus points cannot exceed 20 points under any circumstances.
 
 ## DEDUCTIONS
-**For Simple Projects:**
-- -2 to -5 points if resume contains only simple tutorial projects
-- -1 to -3 points for each simple project beyond the first one
-- -1 point for projects with generic names like "Calculator", "Todo App", "Weather App"
-- -2 points if all projects are classroom assignments or tutorial-based
-
-**For Projects Without Links:**
-- -3 to -5 points for each project without any GitHub link, live demo, or active URL
-- -2 to -3 points for each project with only GitHub link but no live demo
-- -1 to -2 points for each project with broken or inactive links
-
-**CRITICAL ENFORCEMENT:**
-- When GitHub data shows all projects are 'self_project' type, apply 3-5 point deductions for lack of true open source contributions
-- For candidates with only personal GitHub repositories, open source score should NEVER exceed 10 points
-- For candidates with only tutorial-based projects, self_projects score should NEVER exceed 15 points
+- -2 to -5 points for missing or extremely thin essay answers (well under the expected length with little substance)
+- -1 to -3 points for answers that ignore the actual question asked
+- -2 points for no evidence of genuine interest in consulting or the club
+- -1 point for generic, copy-paste-sounding answers across multiple essays
 
 ## CRITICAL REQUIREMENTS
-1. You MUST respond with ONLY the JSON structure below - no summary, no other fields
-2. You MUST fill ALL FOUR score categories: open_source, self_projects, production, technical_skills
-3. You MUST provide evidence for each score
-4. You MUST NOT add any other fields like "summary", "skills", "experience", etc.
+1. You MUST respond with ONLY the JSON structure below
+2. You MUST fill ALL FOUR score categories
+3. You MUST provide evidence for each score, quoting or paraphrasing the relevant essay/commitment content
+4. You MUST NOT add any other fields
 5. You MUST NOT change the field names or structure
 
 **IMPORTANT LIST CONSTRAINTS:**
@@ -156,23 +121,23 @@ You are evaluating a resume for a Software Intern position at HackerRank. Analyz
 - Evidence fields cannot be empty string
 - All category scores must be >= 0 (cannot be negative)
 - **CATEGORY SCORE LIMITS** (CANNOT be exceeded under any circumstances):
-  - open_source: 0-35 points (maximum 35)
-  - self_projects: 0-30 points (maximum 30)
-  - production: 0-25 points (maximum 25)
-  - technical_skills: 0-10 points (maximum 10)
+  - motivation_fit: 0-25 points (maximum 25)
+  - collaboration_perspective: 0-25 points (maximum 25)
+  - values_judgment: 0-25 points (maximum 25)
+  - commitments_experience: 0-25 points (maximum 25)
 - Bonus points total must be <= 20 (maximum 20 points)
 - **OVERALL SCORE LIMIT**: The total score (categories + bonus - deductions) cannot exceed 120 points
 
-**DO NOT RETURN A RESUME SUMMARY. RETURN ONLY THE SCORING EVALUATION IN THE SPECIFIED JSON FORMAT.**
+**DO NOT RETURN A SUMMARY OF THE APPLICATION. RETURN ONLY THE SCORING EVALUATION IN THE SPECIFIED JSON FORMAT.**
 
-Analyze the following resume and provide a JSON response with this EXACT structure (all fields are required):
+Analyze the following application and provide a JSON response with this EXACT structure (all fields are required):
 
 {
     "scores": {
-        "open_source": {"score": 0, "max": 35, "evidence": "string"},
-        "self_projects": {"score": 0, "max": 30, "evidence": "string"},
-        "production": {"score": 0, "max": 25, "evidence": "string"},
-        "technical_skills": {"score": 0, "max": 10, "evidence": "string"}
+        "motivation_fit": {"score": 0, "max": 25, "evidence": "string"},
+        "collaboration_perspective": {"score": 0, "max": 25, "evidence": "string"},
+        "values_judgment": {"score": 0, "max": 25, "evidence": "string"},
+        "commitments_experience": {"score": 0, "max": 25, "evidence": "string"}
     },
     "bonus_points": {"total": 0, "breakdown": "string"},
     "deductions": {"total": 0, "reasons": "string"},
@@ -180,6 +145,6 @@ Analyze the following resume and provide a JSON response with this EXACT structu
     "areas_for_improvement": ["improvement1", "improvement2", "improvement3"]
 }
 
-Resume to evaluate:
+Application to evaluate:
 
 {{ text_content }}

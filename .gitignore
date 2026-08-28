@@ -224,3 +224,14 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+# Applicant data / PII - never commit
+uploads/
+output/
+test_resumes/
+resume_evaluations.csv
+batch_evaluations.csv
+jobs/
+
+# local session/tooling artifacts
+.omo/
+session-*.md

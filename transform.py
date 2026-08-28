@@ -109,7 +109,6 @@ def extract_domain_from_url(url: str) -> str:
 
 def get_network_name(domain: str) -> str:
     domain_mapping = {
-        "github.com": "GitHub",
         "linkedin.com": "LinkedIn",
         "leetcode.com": "LeetCode",
         "stackoverflow.com": "Stack Overflow",
@@ -495,24 +494,12 @@ def fetch_profile(profiles, network_names, prefix):
 
 
 def transform_evaluation_response(
-    file_name=None, resume_data=None, github_data=None, evaluation=None
+    file_name=None, resume_data=None, evaluation=None
 ):
-    """
-    Transform the three inputs (resume_data, github_data, evaluation) into the most important columns as a CSV row.
-
-    Args:
-        resume_data: JSONResume object containing parsed resume data
-        github_data: dict containing GitHub profile data
-        evaluation: EvaluationData object containing evaluation results
-
-    Returns:
-        dict: Dictionary with the most important columns for CSV output
-    """
     csv_row = {}
 
     csv_row["file_name"] = file_name
 
-    # Extract basic information from resume_data
     if resume_data and hasattr(resume_data, "basics") and resume_data.basics:
         basics = resume_data.basics
         csv_row["name"] = basics.name if basics.name else ""
@@ -525,85 +512,24 @@ def transform_evaluation_response(
         )
         csv_row["summary"] = basics.summary if basics.summary else ""
 
-        # Extract all profile information
         if basics.profiles:
-            # Extract profiles for each platform
-            github_profile = fetch_profile(basics.profiles, ["github"], "github")
             linkedin_profile = fetch_profile(basics.profiles, ["linkedin"], "linkedin")
-            twitter_profile = fetch_profile(
-                basics.profiles, ["twitter", "x"], "twitter"
-            )
-            dev_profile = fetch_profile(
-                basics.profiles, ["dev community", "dev"], "dev"
-            )
-            behance_profile = fetch_profile(basics.profiles, ["behance"], "behance")
-
-            # Add GitHub profile columns
-            if github_profile:
-                csv_row["github_url"] = github_profile.url
-                csv_row["github_username"] = (
-                    github_profile.username if github_profile.username else ""
-                )
-            else:
-                csv_row["github_url"] = ""
-                csv_row["github_username"] = ""
-
-            # Add LinkedIn profile columns
             if linkedin_profile:
                 csv_row["linkedin_url"] = linkedin_profile.url
-                csv_row["linkedin_username"] = (
-                    linkedin_profile.username if linkedin_profile.username else ""
-                )
+                csv_row["linkedin_username"] = linkedin_profile.username if linkedin_profile.username else ""
             else:
                 csv_row["linkedin_url"] = ""
                 csv_row["linkedin_username"] = ""
-
-            # Add Twitter/X profile columns
-            if twitter_profile:
-                csv_row["twitter_url"] = twitter_profile.url
-                csv_row["twitter_username"] = (
-                    twitter_profile.username if twitter_profile.username else ""
-                )
-            else:
-                csv_row["twitter_url"] = ""
-                csv_row["twitter_username"] = ""
-
-            # Add DEV Community profile columns
-            if dev_profile:
-                csv_row["dev_url"] = dev_profile.url
-                csv_row["dev_username"] = (
-                    dev_profile.username if dev_profile.username else ""
-                )
-            else:
-                csv_row["dev_url"] = ""
-                csv_row["dev_username"] = ""
-
-            # Add Behance profile columns
-            if behance_profile:
-                csv_row["behance_url"] = behance_profile.url
-                csv_row["behance_username"] = (
-                    behance_profile.username if behance_profile.username else ""
-                )
-            else:
-                csv_row["behance_url"] = ""
-                csv_row["behance_username"] = ""
         else:
-            # Initialize empty profile columns
-            for prefix in ["github", "linkedin", "twitter", "dev", "behance"]:
-                csv_row[f"{prefix}_url"] = ""
-                csv_row[f"{prefix}_username"] = ""
+            csv_row["linkedin_url"] = ""
+            csv_row["linkedin_username"] = ""
 
-    # Extract work experience summary
     if resume_data and hasattr(resume_data, "work") and resume_data.work:
         work_experience = resume_data.work
         csv_row["total_work_experience"] = len(work_experience)
-
-        # Get most recent position
         if work_experience:
-            latest_work = work_experience[0]  # Assuming sorted by date
-            csv_row["current_position"] = (
-                latest_work.position if latest_work.position else ""
-            )
+            latest_work = work_experience[0]
+            csv_row["current_position"] = latest_work.position if latest_work.position else ""
             csv_row["current_company"] = latest_work.name if latest_work.name else ""
         else:
             csv_row["current_position"] = ""
@@ -613,20 +539,13 @@ def transform_evaluation_response(
         csv_row["current_position"] = ""
         csv_row["current_company"] = ""
 
-    # Extract education summary
     if resume_data and hasattr(resume_data, "education") and resume_data.education:
         education = resume_data.education
         csv_row["total_education"] = len(education)
-
-        # Get highest education level
         if education:
-            highest_edu = education[0]  # Assuming sorted by date
-            csv_row["highest_degree"] = (
-                highest_edu.studyType if highest_edu.studyType else ""
-            )
-            csv_row["institution"] = (
-                highest_edu.institution if highest_edu.institution else ""
-            )
+            highest_edu = education[0]
+            csv_row["highest_degree"] = highest_edu.studyType if highest_edu.studyType else ""
+            csv_row["institution"] = highest_edu.institution if highest_edu.institution else ""
         else:
             csv_row["highest_degree"] = ""
             csv_row["institution"] = ""
@@ -635,7 +554,6 @@ def transform_evaluation_response(
         csv_row["highest_degree"] = ""
         csv_row["institution"] = ""
 
-    # Extract skills summary
     if resume_data and hasattr(resume_data, "skills") and resume_data.skills:
         skills = resume_data.skills
         all_skills = []
@@ -643,76 +561,62 @@ def transform_evaluation_response(
             if skill_category.keywords:
                 all_skills.extend(skill_category.keywords)
         csv_row["total_skills"] = len(all_skills)
-        csv_row["skills_list"] = ", ".join(all_skills[:10])  # Top 10 skills
+        csv_row["skills_list"] = ", ".join(all_skills[:10])
     else:
         csv_row["total_skills"] = 0
         csv_row["skills_list"] = ""
 
-    # Extract projects summary
     if resume_data and hasattr(resume_data, "projects") and resume_data.projects:
         projects = resume_data.projects
         csv_row["total_projects"] = len(projects)
     else:
         csv_row["total_projects"] = 0
 
-    # Extract GitHub data
-    if github_data:
-        csv_row["github_repos"] = github_data.get("public_repos", 0)
-        csv_row["github_followers"] = github_data.get("followers", 0)
-        csv_row["github_following"] = github_data.get("following", 0)
-        csv_row["github_created_at"] = github_data.get("created_at", "")
-        csv_row["github_bio"] = github_data.get("bio", "")
-    else:
-        csv_row["github_repos"] = 0
-        csv_row["github_followers"] = 0
-        csv_row["github_following"] = 0
-        csv_row["github_created_at"] = ""
-        csv_row["github_bio"] = ""
-
-    # Extract evaluation scores
     if evaluation and hasattr(evaluation, "scores"):
         scores = evaluation.scores
 
-        csv_row["open_source_score"] = scores.open_source.score
-        csv_row["open_source_max"] = scores.open_source.max
+        csv_row["motivation_fit_score"] = scores.motivation_fit.score
+        csv_row["motivation_fit_max"] = scores.motivation_fit.max
 
-        csv_row["self_projects_score"] = scores.self_projects.score
-        csv_row["self_projects_max"] = scores.self_projects.max
+        csv_row["collaboration_perspective_score"] = scores.collaboration_perspective.score
+        csv_row["collaboration_perspective_max"] = scores.collaboration_perspective.max
 
-        csv_row["production_score"] = scores.production.score
-        csv_row["production_max"] = scores.production.max
+        csv_row["values_judgment_score"] = scores.values_judgment.score
+        csv_row["values_judgment_max"] = scores.values_judgment.max
 
-        csv_row["technical_skills_score"] = scores.technical_skills.score
-        csv_row["technical_skills_max"] = scores.technical_skills.max
+        csv_row["commitments_experience_score"] = scores.commitments_experience.score
+        csv_row["commitments_experience_max"] = scores.commitments_experience.max
 
         total_score = (
-            scores.open_source.score
-            + scores.self_projects.score
-            + scores.production.score
-            + scores.technical_skills.score
+            scores.motivation_fit.score
+            + scores.collaboration_perspective.score
+            + scores.values_judgment.score
+            + scores.commitments_experience.score
         )
         total_max = (
-            scores.open_source.max
-            + scores.self_projects.max
-            + scores.production.max
-            + scores.technical_skills.max
+            scores.motivation_fit.max
+            + scores.collaboration_perspective.max
+            + scores.values_judgment.max
+            + scores.commitments_experience.max
         )
 
         csv_row["total_score"] = total_score
         csv_row["total_max"] = total_max
     else:
-        csv_row["open_source_score"] = "N/A"
-        csv_row["open_source_max"] = "N/A"
-        csv_row["self_projects_score"] = "N/A"
-        csv_row["self_projects_max"] = "N/A"
-        csv_row["production_score"] = "N/A"
-        csv_row["production_max"] = "N/A"
-        csv_row["technical_skills_score"] = "N/A"
-        csv_row["technical_skills_max"] = "N/A"
+        csv_row["motivation_fit_score"] = "N/A"
+        csv_row["motivation_fit_max"] = "N/A"
+        csv_row["collaboration_perspective_score"] = "N/A"
+        csv_row["collaboration_perspective_max"] = "N/A"
+        csv_row["values_judgment_score"] = "N/A"
+        csv_row["values_judgment_max"] = "N/A"
+        csv_row["commitments_experience_score"] = "N/A"
+        csv_row["commitments_experience_max"] = "N/A"
         csv_row["total_score"] = "N/A"
         csv_row["total_max"] = "N/A"
 
-    # Extract bonus points and deductions
+    csv_row["gpa_value"] = getattr(evaluation, "gpa_value", "") or "" if evaluation else ""
+    csv_row["gpa_status"] = getattr(evaluation, "gpa_status", "") or "" if evaluation else ""
+
     if evaluation and hasattr(evaluation, "bonus_points"):
         csv_row["bonus_points"] = evaluation.bonus_points.total
         csv_row["bonus_breakdown"] = evaluation.bonus_points.breakdown
@@ -727,7 +631,6 @@ def transform_evaluation_response(
         csv_row["deductions"] = 0
         csv_row["deduction_reasons"] = ""
 
-    # Extract key strengths and areas for improvement
     if evaluation and hasattr(evaluation, "key_strengths"):
         csv_row["key_strengths"] = "; ".join(evaluation.key_strengths)
     else:
@@ -887,38 +790,6 @@ def convert_json_resume_to_text(resume_data: JSONResume) -> str:
                     text_parts.append(f"    • {highlight}")
 
     return "\n".join(text_parts)
-
-
-def convert_github_data_to_text(github_data: dict) -> str:
-    github_text = "\n\n=== GITHUB DATA ===\n"
-
-    if "profile" in github_data:
-        profile = github_data["profile"]
-        github_text += f"GitHub Profile:\n"
-        github_text += f"- Username: {profile.get('username', 'N/A')}\n"
-        github_text += f"- Name: {profile.get('name', 'N/A')}\n"
-        github_text += f"- Bio: {profile.get('bio', 'N/A')}\n"
-        github_text += f"- Public Repositories: {profile.get('public_repos', 'N/A')}\n"
-        github_text += f"- Followers: {profile.get('followers', 'N/A')}\n"
-        github_text += f"- Following: {profile.get('following', 'N/A')}\n"
-        github_text += f"- Account Created: {profile.get('created_at', 'N/A')}\n"
-        github_text += f"- Last Updated: {profile.get('updated_at', 'N/A')}\n"
-
-    if "projects" in github_data:
-        projects = github_data["projects"]
-        github_text += f"\nGitHub Projects ({len(projects)} total):\n"
-        for i, project in enumerate(projects[:10], 1):
-            github_text += f"{i}. {project.get('name', 'N/A')}\n"
-            github_text += f"   Description: {project.get('description', 'N/A')}\n"
-            github_text += f"   URL: {project.get('github_url', 'N/A')}\n"
-            if "github_details" in project:
-                details = project["github_details"]
-                github_text += f"   Stars: {details.get('stars', 'N/A')}\n"
-                github_text += f"   Forks: {details.get('forks', 'N/A')}\n"
-                github_text += f"   Language: {details.get('language', 'N/A')}\n"
-            github_text += "\n"
-
-    return github_text
 
 
 def convert_blog_data_to_text(blog_data: dict) -> str:

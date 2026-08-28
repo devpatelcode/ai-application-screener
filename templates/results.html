@@ -1,0 +1,233 @@
+{% extends "base.html" %}
+{% block title %}Results - Resume Screener{% endblock %}
+{% block content %}
+<div class="container">
+    <h1>Screening Results</h1>
+    <div class="results-header">
+        <a href="/" class="btn">← Back to Upload</a>
+        <a href="/export/{{ job_id }}" class="btn primary">Download CSV</a>
+    </div>
+
+    <div id="loading">Loading results...</div>
+
+    <div id="resultsContainer" style="display: none;">
+        <div class="summary" id="summary"></div>
+
+        <div class="filters">
+            <input type="text" id="searchInput" placeholder="Search by name..." class="search-input">
+            <select id="sortBy" class="sort-select">
+                <option value="score-desc">Score (High to Low)</option>
+                <option value="score-asc">Score (Low to High)</option>
+                <option value="name-asc">Name (A-Z)</option>
+                <option value="name-desc">Name (Z-A)</option>
+            </select>
+        </div>
+
+        <div class="table-container">
+            <table id="resultsTable">
+                <thead>
+                    <tr>
+                        <th>Rank</th>
+                        <th>Name</th>
+                        <th>GPA</th>
+                        <th>Total Score</th>
+                        <th>Motivation & Fit</th>
+                        <th>Collaboration</th>
+                        <th>Values</th>
+                        <th>Commitments/Exp.</th>
+                        <th>Bonus</th>
+                        <th>Deductions</th>
+                        <th>Details</th>
+                    </tr>
+                </thead>
+                <tbody id="resultsBody"></tbody>
+            </table>
+        </div>
+
+        <div id="detailModal" class="modal" style="display: none;">
+            <div class="modal-content">
+                <span class="close" onclick="closeModal()">&times;</span>
+                <h2 id="modalTitle"></h2>
+                <div id="modalBody"></div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const jobId = '{{ job_id }}';
+let allResults = [];
+
+async function loadResults() {
+    try {
+        const response = await fetch(`/results/${jobId}/data`);
+        const data = await response.json();
+
+        if (data.status !== 'completed') {
+            document.getElementById('loading').textContent = 'Status: ' + data.status + '. Refreshing...';
+            setTimeout(loadResults, 2000);
+            return;
+        }
+
+        allResults = data.results.filter(r => r.success && r.evaluation);
+        renderResults();
+        document.getElementById('loading').style.display = 'none';
+        document.getElementById('resultsContainer').style.display = 'block';
+    } catch (error) {
+        document.getElementById('loading').textContent = 'Error loading results: ' + error.message;
+    }
+}
+
+function calculateTotal(eval) {
+    if (!eval || !eval.scores) return 0;
+    const s = eval.scores;
+    return (s.motivation_fit?.score || 0) +
+           (s.collaboration_perspective?.score || 0) +
+           (s.values_judgment?.score || 0) +
+           (s.commitments_experience?.score || 0);
+}
+
+function gpaBadge(eval) {
+    if (!eval) return '';
+    const status = eval.gpa_status;
+    const value = eval.gpa_value || 'N/A';
+    if (status === 'below_gpa_threshold') return `<span class="badge danger">${value} ⚠️</span>`;
+    if (status === 'gpa_unparseable') return `<span class="badge">${value || 'N/A'} ?</span>`;
+    return `<span class="badge">${value}</span>`;
+}
+
+function renderResults() {
+    const search = document.getElementById('searchInput').value.toLowerCase();
+    const sortBy = document.getElementById('sortBy').value;
+
+    let filtered = allResults.filter(r =>
+        r.candidate_name.toLowerCase().includes(search)
+    );
+
+    filtered.forEach(r => {
+        r.totalScore = calculateTotal(r.evaluation);
+        r.ineligible = r.evaluation?.gpa_status === 'below_gpa_threshold';
+    });
+
+    // Ineligible (below GPA threshold) candidates are shown but excluded from
+    // ranking and from the summary averages/top-candidate stat.
+    const eligible = filtered.filter(r => !r.ineligible);
+    const ineligible = filtered.filter(r => r.ineligible);
+
+    const sortFn = (a, b) => {
+        if (sortBy === 'score-desc') return b.totalScore - a.totalScore;
+        if (sortBy === 'score-asc') return a.totalScore - b.totalScore;
+        if (sortBy === 'name-asc') return a.candidate_name.localeCompare(b.candidate_name);
+        if (sortBy === 'name-desc') return b.candidate_name.localeCompare(a.candidate_name);
+        return 0;
+    };
+    eligible.sort(sortFn);
+    ineligible.sort(sortFn);
+
+    const summary = document.getElementById('summary');
+    const avgScore = eligible.length > 0 ? (eligible.reduce((a, b) => a + b.totalScore, 0) / eligible.length).toFixed(1) : 0;
+    summary.innerHTML = `
+        <div class="stat"><span class="stat-value">${filtered.length}</span><span class="stat-label">Total Candidates</span></div>
+        <div class="stat"><span class="stat-value">${avgScore}</span><span class="stat-label">Average Score (eligible)</span></div>
+        <div class="stat"><span class="stat-value">${eligible.length > 0 ? eligible[0].candidate_name : 'N/A'}</span><span class="stat-label">Top Candidate</span></div>
+        ${ineligible.length > 0 ? `<div class="stat"><span class="stat-value">${ineligible.length}</span><span class="stat-label">Below GPA Threshold</span></div>` : ''}
+    `;
+
+    const tbody = document.getElementById('resultsBody');
+    const rowHtml = (r, rank) => {
+        const eval = r.evaluation;
+        const s = eval?.scores || {};
+        return `
+            <tr${r.ineligible ? ' class="ineligible-row"' : ''}>
+                <td>${rank !== null ? rank : '—'}</td>
+                <td>${r.candidate_name}</td>
+                <td>${gpaBadge(eval)}</td>
+                <td><strong>${r.totalScore.toFixed(1)}</strong></td>
+                <td>${(s.motivation_fit?.score || 0).toFixed(0)}/25</td>
+                <td>${(s.collaboration_perspective?.score || 0).toFixed(0)}/25</td>
+                <td>${(s.values_judgment?.score || 0).toFixed(0)}/25</td>
+                <td>${(s.commitments_experience?.score || 0).toFixed(0)}/25</td>
+                <td>+${eval?.bonus_points?.total || 0}</td>
+                <td>-${eval?.deductions?.total || 0}</td>
+                <td><button class="btn small" onclick='showDetails(${JSON.stringify(r).replace(/'/g, "&#39;")})'>View</button></td>
+            </tr>
+        `;
+    };
+
+    tbody.innerHTML =
+        eligible.map((r, i) => rowHtml(r, i + 1)).join('') +
+        ineligible.map(r => rowHtml(r, null)).join('');
+}
+
+function showDetails(result) {
+    const modal = document.getElementById('detailModal');
+    const eval = result.evaluation;
+    const s = eval?.scores || {};
+
+    document.getElementById('modalTitle').textContent = result.candidate_name;
+
+    let detailsHtml = '';
+    if (eval?.gpa_status === 'below_gpa_threshold') {
+        detailsHtml += `<div class="deduction"><h4>⚠️ Below GPA Threshold</h4><p>Reported GPA: ${eval.gpa_value || 'N/A'} (minimum required: 2.5). Not factored into the score above, but flagged for eligibility review.</p></div>`;
+    } else if (eval?.gpa_status === 'gpa_unparseable') {
+        detailsHtml += `<div class="bonus"><h4>GPA Needs Manual Review</h4><p>Reported GPA: "${eval.gpa_value || 'N/A'}" could not be parsed automatically.</p></div>`;
+    }
+
+    detailsHtml += '<div class="detail-scores">';
+    const categories = [
+        { name: 'Motivation & Fit', data: s.motivation_fit, max: 25 },
+        { name: 'Collaboration & Perspective-Taking', data: s.collaboration_perspective, max: 25 },
+        { name: 'Values & Judgment', data: s.values_judgment, max: 25 },
+        { name: 'Commitments, Leadership & Experience', data: s.commitments_experience, max: 25 },
+    ];
+
+    categories.forEach(cat => {
+        const score = cat.data?.score || 0;
+        const evidence = cat.data?.evidence || 'No evidence';
+        detailsHtml += `
+            <div class="score-category">
+                <h4>${cat.name}: ${score.toFixed(0)}/${cat.max}</h4>
+                <p>${evidence}</p>
+            </div>
+        `;
+    });
+
+    detailsHtml += '</div>';
+
+    if (eval?.bonus_points?.total > 0) {
+        detailsHtml += `<div class="bonus"><h4>Bonus: +${eval.bonus_points.total}</h4><p>${eval.bonus_points.breakdown}</p></div>`;
+    }
+
+    if (eval?.deductions?.total > 0) {
+        detailsHtml += `<div class="deduction"><h4>Deductions: -${eval.deductions.total}</h4><p>${eval.deductions.reasons}</p></div>`;
+    }
+
+    if (eval?.key_strengths?.length > 0) {
+        detailsHtml += `<div class="strengths"><h4>Key Strengths</h4><ul>${eval.key_strengths.map(s => `<li>${s}</li>`).join('')}</ul></div>`;
+    }
+
+    if (eval?.areas_for_improvement?.length > 0) {
+        detailsHtml += `<div class="improvements"><h4>Areas for Improvement</h4><ul>${eval.areas_for_improvement.map(a => `<li>${a}</li>`).join('')}</ul></div>`;
+    }
+
+    document.getElementById('modalBody').innerHTML = detailsHtml;
+    modal.style.display = 'block';
+}
+
+function closeModal() {
+    document.getElementById('detailModal').style.display = 'none';
+}
+
+document.getElementById('searchInput').addEventListener('input', renderResults);
+document.getElementById('sortBy').addEventListener('change', renderResults);
+
+window.onclick = function(event) {
+    const modal = document.getElementById('detailModal');
+    if (event.target === modal) closeModal();
+}
+
+loadResults();
+</script>
+{% endblock %}

@@ -503,7 +503,6 @@ def to_markdown(
         """Match parts of text to specific links based on content and position."""
         # Common platform names to match
         platform_keywords = {
-            "github": ["github", "git"],
             "linkedin": ["linkedin", "linked"],
             "hackerrank": ["hackerrank", "hacker"],
             "twitter": ["twitter", "tweet"],
