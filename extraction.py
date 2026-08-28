@@ -106,6 +106,21 @@ def _docx_via_stdlib(path: Path) -> Optional[str]:
     return text.strip() or None
 
 
+def _docx_is_empty(path: Path) -> bool:
+    """True when the document genuinely contains no text runs.
+
+    Distinguishes "the applicant uploaded a blank file" from "we failed to parse
+    it" -- only the first is actionable by asking for a resubmission.
+    """
+    try:
+        with zipfile.ZipFile(path) as z:
+            xml = z.read("word/document.xml").decode("utf-8", errors="replace")
+        has_media = any("word/media/" in n for n in zipfile.ZipFile(path).namelist())
+        return "<w:t" not in xml and not has_media
+    except Exception:
+        return False
+
+
 def _extract_docx(path: Path) -> ExtractResult:
     text = _docx_via_textutil(path)
     method = "docx:textutil"
@@ -113,6 +128,11 @@ def _extract_docx(path: Path) -> ExtractResult:
         text = _docx_via_stdlib(path)
         method = "docx:stdlib"
     if not text:
+        if _docx_is_empty(path):
+            return ExtractResult(
+                method="docx",
+                error="The uploaded document is blank (no text) — ask the applicant to resubmit",
+            )
         return ExtractResult(
             method="docx", error="DOCX could not be read by textutil or stdlib"
         )

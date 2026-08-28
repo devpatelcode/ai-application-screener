@@ -12,5 +12,5 @@ from config import DEFAULT_MODEL, MODEL_PARAMETERS
 # Load environment variables (kept for any downstream os.getenv use)
 load_dotenv()
 
-# Re-exported for consumers (score.py, evaluator.py, pdf.py).
+# Re-exported for consumers (score.py, evaluator.py, app.py).
 __all__ = ["DEFAULT_MODEL", "MODEL_PARAMETERS"]
