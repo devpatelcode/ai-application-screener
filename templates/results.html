@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Results - Resume Screener{% endblock %}
+{% block title %}Results - Application Screener{% endblock %}
 {% block content %}
 <div class="container">
     <h1>Screening Results</h1>
@@ -9,9 +9,11 @@
     </div>
 
     <div id="loading">Loading results...</div>
+    <div id="loadError" class="banner error" style="display:none;"></div>
 
     <div id="resultsContainer" style="display: none;">
         <div class="summary" id="summary"></div>
+        <div id="reviewNotice" class="banner warn" style="display:none;"></div>
 
         <div class="filters">
             <input type="text" id="searchInput" placeholder="Search by name..." class="search-input">
@@ -30,18 +32,23 @@
                         <th>Rank</th>
                         <th>Name</th>
                         <th>GPA</th>
-                        <th>Total Score</th>
-                        <th>Motivation & Fit</th>
+                        <th>Resume</th>
+                        <th>Total</th>
+                        <th>Motivation</th>
                         <th>Collaboration</th>
                         <th>Values</th>
-                        <th>Commitments/Exp.</th>
-                        <th>Bonus</th>
-                        <th>Deductions</th>
+                        <th>Commitments</th>
                         <th>Details</th>
                     </tr>
                 </thead>
                 <tbody id="resultsBody"></tbody>
             </table>
+        </div>
+
+        <div id="failedSection" style="display:none; margin-top:2rem;">
+            <h3>Not scored</h3>
+            <p class="small">These applicants could not be scored. They are excluded from the ranking above and need manual review.</p>
+            <ul id="failedList" class="issue-list"></ul>
         </div>
 
         <div id="detailModal" class="modal" style="display: none;">
@@ -58,67 +65,133 @@
 {% block scripts %}
 <script>
 const jobId = '{{ job_id }}';
+const CATEGORIES = [
+    { key: 'motivation_fit',            label: 'Motivation & Fit' },
+    { key: 'collaboration_perspective', label: 'Collaboration & Perspective-Taking' },
+    { key: 'values_judgment',           label: 'Values & Judgment' },
+    { key: 'commitments_experience',    label: 'Commitments, Leadership & Experience' },
+];
+const CATEGORY_MAX = 25;
 let allResults = [];
+let consecutiveErrors = 0;
+
+function escapeHtml(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, c => (
+        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+    ));
+}
+
+// Mirrors scoring.compute_total on the server: categories only, each clamped.
+function categoryScore(evaluation, key) {
+    const entry = evaluation && evaluation.scores ? evaluation.scores[key] : null;
+    const raw = entry && typeof entry.score === 'number' ? entry.score : 0;
+    return Math.max(0, Math.min(raw, CATEGORY_MAX));
+}
+function calculateTotal(evaluation) {
+    return CATEGORIES.reduce((sum, c) => sum + categoryScore(evaluation, c.key), 0);
+}
+
+function gpaBadge(r) {
+    const shown = r.gpa_raw || 'N/A';
+    if (r.gpa_status === 'below_gpa_threshold') {
+        return `<span class="badge danger" title="Below the 2.5 minimum">${escapeHtml(shown)} ⚠️</span>`;
+    }
+    if (r.gpa_status === 'needs_review') {
+        return `<span class="badge warn" title="Could not be read automatically — review manually">${escapeHtml(shown)} ?</span>`;
+    }
+    return `<span class="badge">${escapeHtml(shown)}</span>`;
+}
+
+function resumeBadge(r) {
+    const map = {
+        matched:   ['ok',     'Resume included in scoring'],
+        missing:   ['danger', 'No resume was matched — scored without it'],
+        unreadable:['danger', 'Resume found but could not be read'],
+        ambiguous: ['warn',   'Multiple resumes matched this name'],
+    };
+    const [cls, tip] = map[r.resume_status] || ['warn', ''];
+    const note = r.resume_note ? ` — ${r.resume_note}` : '';
+    return `<span class="badge ${cls}" title="${escapeHtml(tip + note)}">${escapeHtml(r.resume_status || 'unknown')}</span>`;
+}
 
 async function loadResults() {
     try {
         const response = await fetch(`/results/${jobId}/data`);
+        if (!response.ok) throw new Error(`server returned ${response.status}`);
         const data = await response.json();
+        consecutiveErrors = 0;
 
-        if (data.status !== 'completed') {
-            document.getElementById('loading').textContent = 'Status: ' + data.status + '. Refreshing...';
-            setTimeout(loadResults, 2000);
-            return;
+        const done = data.status === 'completed';
+        const stopped = data.status === 'failed' || data.status === 'interrupted';
+
+        // Render whatever has been scored so far, even mid-run or after a stop,
+        // instead of hiding completed work behind a spinner.
+        allResults = (data.results || []).filter(r => r.success && r.evaluation);
+        const failed = (data.results || []).filter(r => !r.success);
+
+        if (allResults.length || failed.length) {
+            renderResults(failed);
+            document.getElementById('loading').style.display = 'none';
+            document.getElementById('resultsContainer').style.display = 'block';
         }
 
-        allResults = data.results.filter(r => r.success && r.evaluation);
-        renderResults();
-        document.getElementById('loading').style.display = 'none';
-        document.getElementById('resultsContainer').style.display = 'block';
+        if (stopped) {
+            showBanner(data.error || `Processing ${data.status}.`, allResults.length > 0);
+            return;
+        }
+        if (!done) {
+            const seen = data.processed_files || 0;
+            const total = data.total_files || 0;
+            document.getElementById('loading').textContent =
+                `Scoring applicants… ${seen}/${total} done. This page updates automatically.`;
+            setTimeout(loadResults, 2500);
+            return;
+        }
     } catch (error) {
-        document.getElementById('loading').textContent = 'Error loading results: ' + error.message;
+        consecutiveErrors += 1;
+        if (consecutiveErrors >= 3) {
+            // Don't poll forever against a dead server; say so plainly.
+            showBanner(
+                `Lost contact with the server (${error.message}). ` +
+                `Any applicants already scored were saved — reload once it is running again.`,
+                allResults.length > 0
+            );
+            return;
+        }
+        setTimeout(loadResults, 3000);
     }
 }
 
-function calculateTotal(eval) {
-    if (!eval || !eval.scores) return 0;
-    const s = eval.scores;
-    return (s.motivation_fit?.score || 0) +
-           (s.collaboration_perspective?.score || 0) +
-           (s.values_judgment?.score || 0) +
-           (s.commitments_experience?.score || 0);
+function showBanner(message, haveResults) {
+    const el = document.getElementById('loadError');
+    el.textContent = message;
+    el.style.display = 'block';
+    document.getElementById('loading').style.display = 'none';
+    if (haveResults) document.getElementById('resultsContainer').style.display = 'block';
 }
 
-function gpaBadge(eval) {
-    if (!eval) return '';
-    const status = eval.gpa_status;
-    const value = eval.gpa_value || 'N/A';
-    if (status === 'below_gpa_threshold') return `<span class="badge danger">${value} ⚠️</span>`;
-    if (status === 'gpa_unparseable') return `<span class="badge">${value || 'N/A'} ?</span>`;
-    return `<span class="badge">${value}</span>`;
-}
-
-function renderResults() {
+function renderResults(failed) {
+    failed = failed || [];
     const search = document.getElementById('searchInput').value.toLowerCase();
     const sortBy = document.getElementById('sortBy').value;
 
     let filtered = allResults.filter(r =>
-        r.candidate_name.toLowerCase().includes(search)
+        (r.candidate_name || '').toLowerCase().includes(search)
     );
-
     filtered.forEach(r => {
         r.totalScore = calculateTotal(r.evaluation);
-        r.ineligible = r.evaluation?.gpa_status === 'below_gpa_threshold';
+        r.ineligible = r.gpa_status === 'below_gpa_threshold';
     });
 
-    // Ineligible (below GPA threshold) candidates are shown but excluded from
-    // ranking and from the summary averages/top-candidate stat.
     const eligible = filtered.filter(r => !r.ineligible);
     const ineligible = filtered.filter(r => r.ineligible);
 
+    // Ties break on name, never on submission order.
     const sortFn = (a, b) => {
-        if (sortBy === 'score-desc') return b.totalScore - a.totalScore;
-        if (sortBy === 'score-asc') return a.totalScore - b.totalScore;
+        if (sortBy === 'score-desc') return (b.totalScore - a.totalScore)
+            || a.candidate_name.localeCompare(b.candidate_name);
+        if (sortBy === 'score-asc') return (a.totalScore - b.totalScore)
+            || a.candidate_name.localeCompare(b.candidate_name);
         if (sortBy === 'name-asc') return a.candidate_name.localeCompare(b.candidate_name);
         if (sortBy === 'name-desc') return b.candidate_name.localeCompare(a.candidate_name);
         return 0;
@@ -126,107 +199,118 @@ function renderResults() {
     eligible.sort(sortFn);
     ineligible.sort(sortFn);
 
-    const summary = document.getElementById('summary');
-    const avgScore = eligible.length > 0 ? (eligible.reduce((a, b) => a + b.totalScore, 0) / eligible.length).toFixed(1) : 0;
-    summary.innerHTML = `
-        <div class="stat"><span class="stat-value">${filtered.length}</span><span class="stat-label">Total Candidates</span></div>
-        <div class="stat"><span class="stat-value">${avgScore}</span><span class="stat-label">Average Score (eligible)</span></div>
-        <div class="stat"><span class="stat-value">${eligible.length > 0 ? eligible[0].candidate_name : 'N/A'}</span><span class="stat-label">Top Candidate</span></div>
-        ${ineligible.length > 0 ? `<div class="stat"><span class="stat-value">${ineligible.length}</span><span class="stat-label">Below GPA Threshold</span></div>` : ''}
+    const avg = eligible.length
+        ? (eligible.reduce((a, b) => a + b.totalScore, 0) / eligible.length).toFixed(1)
+        : '0.0';
+    document.getElementById('summary').innerHTML = `
+        <div class="stat"><span class="stat-value">${filtered.length}</span><span class="stat-label">Scored</span></div>
+        <div class="stat"><span class="stat-value">${avg}</span><span class="stat-label">Average (eligible)</span></div>
+        <div class="stat"><span class="stat-value">${eligible.length ? escapeHtml(eligible[0].candidate_name) : 'N/A'}</span><span class="stat-label">Top Candidate</span></div>
+        ${ineligible.length ? `<div class="stat"><span class="stat-value">${ineligible.length}</span><span class="stat-label">Below GPA</span></div>` : ''}
     `;
 
-    const tbody = document.getElementById('resultsBody');
-    const rowHtml = (r, rank) => {
-        const eval = r.evaluation;
-        const s = eval?.scores || {};
-        return `
-            <tr${r.ineligible ? ' class="ineligible-row"' : ''}>
-                <td>${rank !== null ? rank : '—'}</td>
-                <td>${r.candidate_name}</td>
-                <td>${gpaBadge(eval)}</td>
-                <td><strong>${r.totalScore.toFixed(1)}</strong></td>
-                <td>${(s.motivation_fit?.score || 0).toFixed(0)}/25</td>
-                <td>${(s.collaboration_perspective?.score || 0).toFixed(0)}/25</td>
-                <td>${(s.values_judgment?.score || 0).toFixed(0)}/25</td>
-                <td>${(s.commitments_experience?.score || 0).toFixed(0)}/25</td>
-                <td>+${eval?.bonus_points?.total || 0}</td>
-                <td>-${eval?.deductions?.total || 0}</td>
-                <td><button class="btn small" onclick='showDetails(${JSON.stringify(r).replace(/'/g, "&#39;")})'>View</button></td>
-            </tr>
-        `;
-    };
+    const needsReview = filtered.filter(r => r.gpa_status === 'needs_review').length;
+    const noResume = filtered.filter(r => r.resume_status !== 'matched').length;
+    const notices = [];
+    if (needsReview) notices.push(`${needsReview} applicant(s) have a GPA that could not be read automatically`);
+    if (noResume) notices.push(`${noResume} applicant(s) were scored without a readable resume`);
+    const notice = document.getElementById('reviewNotice');
+    if (notices.length) {
+        notice.textContent = 'Needs manual review: ' + notices.join('; ') + '.';
+        notice.style.display = 'block';
+    } else {
+        notice.style.display = 'none';
+    }
 
-    tbody.innerHTML =
+    const rowHtml = (r, rank) => `
+        <tr${r.ineligible ? ' class="ineligible-row"' : ''}>
+            <td>${rank === null ? '—' : rank}</td>
+            <td>${escapeHtml(r.candidate_name)}</td>
+            <td>${gpaBadge(r)}</td>
+            <td>${resumeBadge(r)}</td>
+            <td><strong>${r.totalScore.toFixed(1)}</strong></td>
+            ${CATEGORIES.map(c =>
+                `<td>${categoryScore(r.evaluation, c.key).toFixed(0)}/${CATEGORY_MAX}</td>`
+            ).join('')}
+            <td><button class="btn small" data-name="${escapeHtml(r.candidate_name)}">View</button></td>
+        </tr>`;
+
+    document.getElementById('resultsBody').innerHTML =
         eligible.map((r, i) => rowHtml(r, i + 1)).join('') +
         ineligible.map(r => rowHtml(r, null)).join('');
+
+    const failedSection = document.getElementById('failedSection');
+    if (failed.length) {
+        document.getElementById('failedList').innerHTML = failed.map(r =>
+            `<li><strong>${escapeHtml(r.candidate_name)}</strong> — ${escapeHtml(r.error || 'unknown error')}</li>`
+        ).join('');
+        failedSection.style.display = 'block';
+    } else {
+        failedSection.style.display = 'none';
+    }
 }
 
-function showDetails(result) {
-    const modal = document.getElementById('detailModal');
-    const eval = result.evaluation;
-    const s = eval?.scores || {};
+// Delegated so candidate data never has to be JSON-encoded into an attribute.
+document.getElementById('resultsBody').addEventListener('click', function (e) {
+    const btn = e.target.closest('button[data-name]');
+    if (!btn) return;
+    const r = allResults.find(x => x.candidate_name === btn.getAttribute('data-name'));
+    if (r) showDetails(r);
+});
 
+function showDetails(result) {
+    const evaluation = result.evaluation;
     document.getElementById('modalTitle').textContent = result.candidate_name;
 
-    let detailsHtml = '';
-    if (eval?.gpa_status === 'below_gpa_threshold') {
-        detailsHtml += `<div class="deduction"><h4>⚠️ Below GPA Threshold</h4><p>Reported GPA: ${eval.gpa_value || 'N/A'} (minimum required: 2.5). Not factored into the score above, but flagged for eligibility review.</p></div>`;
-    } else if (eval?.gpa_status === 'gpa_unparseable') {
-        detailsHtml += `<div class="bonus"><h4>GPA Needs Manual Review</h4><p>Reported GPA: "${eval.gpa_value || 'N/A'}" could not be parsed automatically.</p></div>`;
+    let html = '';
+    if (result.gpa_status === 'below_gpa_threshold') {
+        html += `<div class="deduction"><h4>⚠️ Below GPA threshold</h4><p>Reported GPA: ${escapeHtml(result.gpa_raw || 'N/A')} (minimum 2.5). GPA does not affect the score below; this is an eligibility flag only.</p></div>`;
+    } else if (result.gpa_status === 'needs_review') {
+        html += `<div class="bonus"><h4>GPA needs manual review</h4><p>Reported as "${escapeHtml(result.gpa_raw || 'N/A')}", which could not be read as a number. The applicant remains eligible.</p></div>`;
+    }
+    if (result.resume_status !== 'matched') {
+        html += `<div class="deduction"><h4>Resume: ${escapeHtml(result.resume_status)}</h4><p>${escapeHtml(result.resume_note || 'Scored without resume content.')}</p></div>`;
+    } else if (result.resume_file) {
+        html += `<div class="strengths"><h4>Resume used</h4><p>${escapeHtml(result.resume_file)}</p></div>`;
     }
 
-    detailsHtml += '<div class="detail-scores">';
-    const categories = [
-        { name: 'Motivation & Fit', data: s.motivation_fit, max: 25 },
-        { name: 'Collaboration & Perspective-Taking', data: s.collaboration_perspective, max: 25 },
-        { name: 'Values & Judgment', data: s.values_judgment, max: 25 },
-        { name: 'Commitments, Leadership & Experience', data: s.commitments_experience, max: 25 },
-    ];
-
-    categories.forEach(cat => {
-        const score = cat.data?.score || 0;
-        const evidence = cat.data?.evidence || 'No evidence';
-        detailsHtml += `
-            <div class="score-category">
-                <h4>${cat.name}: ${score.toFixed(0)}/${cat.max}</h4>
-                <p>${evidence}</p>
-            </div>
-        `;
+    html += '<div class="detail-scores">';
+    CATEGORIES.forEach(c => {
+        const entry = (evaluation.scores || {})[c.key] || {};
+        html += `<div class="score-category">
+            <h4>${c.label}: ${categoryScore(evaluation, c.key).toFixed(0)}/${CATEGORY_MAX}</h4>
+            <p>${escapeHtml(entry.evidence || 'No evidence provided')}</p>
+        </div>`;
     });
+    html += `</div><p><strong>Total: ${calculateTotal(evaluation).toFixed(1)}/100</strong></p>`;
 
-    detailsHtml += '</div>';
-
-    if (eval?.bonus_points?.total > 0) {
-        detailsHtml += `<div class="bonus"><h4>Bonus: +${eval.bonus_points.total}</h4><p>${eval.bonus_points.breakdown}</p></div>`;
+    if ((evaluation.key_strengths || []).length) {
+        html += `<div class="strengths"><h4>Key Strengths</h4><ul>${
+            evaluation.key_strengths.map(s => `<li>${escapeHtml(s)}</li>`).join('')
+        }</ul></div>`;
+    }
+    if ((evaluation.areas_for_improvement || []).length) {
+        html += `<div class="improvements"><h4>Areas for Improvement</h4><ul>${
+            evaluation.areas_for_improvement.map(a => `<li>${escapeHtml(a)}</li>`).join('')
+        }</ul></div>`;
+    }
+    if ((result.warnings || []).length) {
+        html += `<div class="improvements"><h4>Data warnings</h4><ul>${
+            result.warnings.map(w => `<li>${escapeHtml(w)}</li>`).join('')
+        }</ul></div>`;
     }
 
-    if (eval?.deductions?.total > 0) {
-        detailsHtml += `<div class="deduction"><h4>Deductions: -${eval.deductions.total}</h4><p>${eval.deductions.reasons}</p></div>`;
-    }
-
-    if (eval?.key_strengths?.length > 0) {
-        detailsHtml += `<div class="strengths"><h4>Key Strengths</h4><ul>${eval.key_strengths.map(s => `<li>${s}</li>`).join('')}</ul></div>`;
-    }
-
-    if (eval?.areas_for_improvement?.length > 0) {
-        detailsHtml += `<div class="improvements"><h4>Areas for Improvement</h4><ul>${eval.areas_for_improvement.map(a => `<li>${a}</li>`).join('')}</ul></div>`;
-    }
-
-    document.getElementById('modalBody').innerHTML = detailsHtml;
-    modal.style.display = 'block';
+    document.getElementById('modalBody').innerHTML = html;
+    document.getElementById('detailModal').style.display = 'block';
 }
 
 function closeModal() {
     document.getElementById('detailModal').style.display = 'none';
 }
 
-document.getElementById('searchInput').addEventListener('input', renderResults);
-document.getElementById('sortBy').addEventListener('change', renderResults);
-
-window.onclick = function(event) {
-    const modal = document.getElementById('detailModal');
-    if (event.target === modal) closeModal();
-}
+document.getElementById('searchInput').addEventListener('input', () => renderResults());
+document.getElementById('sortBy').addEventListener('change', () => renderResults());
+window.onclick = e => { if (e.target === document.getElementById('detailModal')) closeModal(); };
 
 loadResults();
 </script>

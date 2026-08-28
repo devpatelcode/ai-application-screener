@@ -45,51 +45,80 @@ pip install -r requirements.txt
 
 ### Ollama Setup
 
+> **Important:** Ollama defaults to a 4096-token context window and **truncates
+> longer prompts silently**. A truncated prompt loses the end — which is exactly
+> where the applicant's essays and resume are — so the model returns a confident,
+> well-formed, and *wrong* score with no error. Always start Ollama with a larger
+> window:
+
 ```bash
-ollama serve  # Start Ollama
-ollama pull gemma3:4b  # Pull the default model
+OLLAMA_CONTEXT_LENGTH=32768 ollama serve   # required, not optional
+ollama pull gemma3:4b                      # the default model
 ```
+
+Per-request `num_ctx` does **not** override this — it must be set when the server
+starts. The app probes the real window on startup, logs it, and warns loudly if
+it is too small, so you never have to take this on faith:
+
+```
+Model gemma3:4b serving 32768-token context (ollama:/api/ps)
+```
+
+Verify independently with `curl -s http://localhost:11434/api/ps`.
 
 ---
 
 ## Usage
 
-### CLI - Single Resume
-
-```bash
-python score.py ./resume/sample.pdf
-```
-
-### CLI - Batch Processing
-
-```bash
-python score.py ./resumes/
-python score.py ./resumes/ ./output/results.csv
-```
-
-### Web UI - Google Forms Application (CSV + Resume ZIP)
+### Web UI — the normal path (CSV + resume ZIP)
 
 ```bash
 python app.py
 ```
 
-Upload the Google Forms CSV export together with a ZIP of applicant resumes in
-one go. Each applicant is matched to their resume by fuzzy name match (the
-"Resume" column in the CSV is a Drive link the app can't fetch, so the ZIP's
-filenames need to reasonably match the applicant's name). Each CSV row becomes
-its own scored row in the results table — it does not need to be one file at a
-time.
+Open http://localhost:8000 and upload two files together:
 
-### Web UI - Bare Resume PDFs
+1. the **Google Forms CSV export** of application responses, and
+2. the **ZIP of resumes** downloaded from the form's Drive folder.
 
-Then open http://localhost:8000 in your browser.
+Each CSV row becomes its own scored candidate. Resumes are matched to applicants
+using the owner name Google Forms appends to each uploaded filename
+(`<original> - <Full Name>.<ext>`), which is exact rather than a fuzzy guess. A
+resume is attached only on an unambiguous match; if two files could belong to the
+same person, the applicant is flagged instead of being given a coin-flip resume.
+
+**Supported resume formats:** PDF, DOCX, and images (PNG/JPG, transcribed with a
+vision model). Anything unreadable is reported per-candidate rather than silently
+skipped, so you always know who was scored without a resume.
 
 **Features:**
-- Drag-and-drop PDF upload
-- Real-time processing progress
-- Results dashboard with sorting and filtering
-- Customizable scoring rubric
-- CSV export
+- Drag-and-drop upload of CSV + ZIP
+- Live progress, and results visible while the run is still going
+- Ranked dashboard with search, sorting and per-category evidence
+- Resume and GPA status flags for anything needing human review
+- CSV export, downloadable at any point during or after the run
+
+### Resuming an interrupted run
+
+Job state is written to `jobs/<job_id>/` after **every** applicant, so nothing is
+lost if the server stops mid-run. On restart, unfinished jobs are marked
+`interrupted` rather than appearing to hang, and:
+
+```bash
+curl -X POST http://localhost:8000/jobs/<job_id>/resume   # skips already-scored applicants
+curl http://localhost:8000/jobs                           # list all past jobs
+curl -O http://localhost:8000/export/<job_id>             # works even after a restart
+```
+
+### CLI — scoring a single resume file
+
+```bash
+python score.py ./resume/sample.pdf
+```
+
+Useful for spot-checking extraction. Note there are no essay answers on this
+path, so the three essay categories score from resume content alone — the web
+CSV+ZIP flow is the intended way to review real applications.
 
 ---
 
@@ -103,8 +132,12 @@ cp .env.example .env
 
 | Variable | Values | Description |
 |----------|--------|-------------|
-| `LLM_PROVIDER` | `ollama` | LLM backend (Ollama only) |
-| `DEFAULT_MODEL` | `gemma3:4b` | Model name |
+| `DEFAULT_MODEL` | `gemma3:4b` | Model name; must exist in `providers.json` |
+| `OLLAMA_CONTEXT_LENGTH` | `32768` | **Set on the Ollama server**, not the app. Too small = silent truncation = wrong scores |
+| `GEMINI_API_KEY` | — | Only needed if you select a `gemini-*` model |
+
+Applicant data (`uploads/`, `output/`, `jobs/`) is gitignored — it contains real
+names, emails, phone numbers, GPAs, essays and resumes. Keep it that way.
 
 ---
 
@@ -122,7 +155,7 @@ cp .env.example .env
 # Save a preset
 curl -X POST http://localhost:8000/rubric/preset/my-preset \
   -H "Content-Type: application/json" \
-  -d '{"leadership_teamwork": 30, "communication_skills": 25, "problem_solving": 20, "relevant_experience": 15, "academic_performance": 10}'
+  -d '{"motivation_fit": 30, "collaboration_perspective": 25, "values_judgment": 25, "commitments_experience": 20, "gpa_threshold": 2.5}'
 
 # List presets
 curl http://localhost:8000/rubric/presets
@@ -137,31 +170,26 @@ curl http://localhost:8000/rubric/preset/my-preset
 
 ```
 .
-├── app.py                    # FastAPI web server
-├── batch.py                  # Batch processing logic
-├── config.py                 # Provider configuration
-├── evaluator.py              # Resume evaluation logic
-├── llm_utils.py              # LLM provider utilities
-├── models.py                 # Pydantic schemas
-├── pdf.py                    # PDF extraction
-├── prompt.py                 # Prompt utilities
-├── prompts/
-│   ├── template_manager.py
-│   └── templates/            # Evaluation criteria templates
-├── pymupdf_rag.py            # PDF to Markdown conversion
-├── requirements.txt
-├── score.py                  # CLI entry point
-├── static/
-│   └── style.css             # Web UI styling
-├── templates/
-│   ├── base.html
-│   ├── upload.html
-│   ├── results.html
-│   └── rubric.html
-├── transform.py              # Data transformation
-└── resume/
-    └── sample.pdf
+├── app.py                    # FastAPI server: HTTP + job orchestration only
+├── intake.py                 # Form CSV -> applicants; columns, GPA, resume matching
+├── extraction.py             # Resume file -> text (PDF / DOCX / image)
+├── evaluator.py              # One scoring call, with JSON-repair retry
+├── scoring.py                # THE definition of a candidate's total score
+├── jobstore.py               # Durable job state + incremental CSV
+├── preflight.py              # Context-window guard against silent truncation
+├── models.py                 # Pydantic schemas + LLM transport (retries)
+├── config.py                 # Provider/model resolution from providers.json
+├── llm_utils.py              # Provider factory + tolerant JSON extraction
+├── transform.py              # Result record -> CSV row
+├── prompts/templates/        # Rubric + system message (Jinja)
+├── templates/                # upload / results / rubric pages
+├── static/style.css
+├── score.py, batch.py        # CLI entry points
+└── jobs/<job_id>/            # Persisted state + results (gitignored)
 ```
+
+Each module has one job, so a change to the rubric, the file formats, or the
+persistence model touches exactly one file.
 
 ---
 
@@ -170,11 +198,13 @@ curl http://localhost:8000/rubric/preset/my-preset
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/` | Upload page |
-| POST | `/upload` | Upload PDF files |
-| GET | `/jobs/{job_id}` | Get job status |
+| POST | `/upload` | Upload the application CSV (+ optional resume ZIP) |
+| GET | `/jobs` | List all jobs, including past runs |
+| GET | `/jobs/{job_id}` | Lightweight progress for polling |
+| POST | `/jobs/{job_id}/resume` | Resume an interrupted job |
 | GET | `/results/{job_id}` | Results page |
-| GET | `/results/{job_id}/data` | Results JSON data |
-| GET | `/export/{job_id}` | Download CSV |
+| GET | `/results/{job_id}/data` | Full results JSON |
+| GET | `/export/{job_id}` | Download CSV (served from disk, survives restarts) |
 | GET | `/rubric` | Rubric customization page |
 | POST | `/rubric/preset/{name}` | Save rubric preset |
 | GET | `/rubric/presets` | List saved presets |

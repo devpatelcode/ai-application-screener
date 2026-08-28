@@ -614,23 +614,6 @@ def transform_evaluation_response(
         csv_row["total_score"] = "N/A"
         csv_row["total_max"] = "N/A"
 
-    csv_row["gpa_value"] = getattr(evaluation, "gpa_value", "") or "" if evaluation else ""
-    csv_row["gpa_status"] = getattr(evaluation, "gpa_status", "") or "" if evaluation else ""
-
-    if evaluation and hasattr(evaluation, "bonus_points"):
-        csv_row["bonus_points"] = evaluation.bonus_points.total
-        csv_row["bonus_breakdown"] = evaluation.bonus_points.breakdown
-    else:
-        csv_row["bonus_points"] = 0
-        csv_row["bonus_breakdown"] = ""
-
-    if evaluation and hasattr(evaluation, "deductions"):
-        csv_row["deductions"] = evaluation.deductions.total
-        csv_row["deduction_reasons"] = evaluation.deductions.reasons
-    else:
-        csv_row["deductions"] = 0
-        csv_row["deduction_reasons"] = ""
-
     if evaluation and hasattr(evaluation, "key_strengths"):
         csv_row["key_strengths"] = "; ".join(evaluation.key_strengths)
     else:
@@ -642,6 +625,49 @@ def transform_evaluation_response(
         csv_row["areas_for_improvement"] = ""
 
     return csv_row
+
+
+def evaluation_to_csv_row(record: Dict) -> Dict:
+    """Flatten one scored applicant into an export row.
+
+    Takes the job's result record (which carries the applicant's identity and
+    GPA/resume metadata) rather than an evaluation alone -- the previous export
+    had no name column at all, so every row in a batch was labelled with the
+    same source-CSV filename and the download was unusable.
+    """
+    from scoring import CATEGORY_ORDER, TOTAL_MAX, category_score, compute_total
+
+    evaluation = record.get("evaluation") or {}
+    scores = evaluation.get("scores") or {}
+
+    row = {
+        "candidate_name": record.get("candidate_name", ""),
+        "email": record.get("email", ""),
+        "year": record.get("year", ""),
+        "total_score": round(compute_total(evaluation), 1),
+        "total_max": TOTAL_MAX,
+    }
+
+    for category in CATEGORY_ORDER:
+        row[f"{category}_score"] = round(category_score(evaluation, category), 1)
+
+    row["gpa"] = record.get("gpa_raw", "")
+    row["gpa_parsed"] = record.get("gpa_value") if record.get("gpa_value") is not None else ""
+    row["gpa_status"] = record.get("gpa_status", "")
+    row["resume_status"] = record.get("resume_status", "")
+    row["resume_file"] = record.get("resume_file", "")
+    row["resume_note"] = record.get("resume_note", "")
+
+    for category in CATEGORY_ORDER:
+        entry = scores.get(category) or {}
+        row[f"{category}_evidence"] = entry.get("evidence", "")
+
+    row["key_strengths"] = "; ".join(evaluation.get("key_strengths") or [])
+    row["areas_for_improvement"] = "; ".join(
+        evaluation.get("areas_for_improvement") or []
+    )
+    row["warnings"] = "; ".join(record.get("warnings") or [])
+    return row
 
 
 def convert_json_resume_to_text(resume_data: JSONResume) -> str:

@@ -4,11 +4,11 @@ import json
 import logging
 from pathlib import Path
 from typing import List, Optional
-from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from score import main as evaluate_single, print_evaluation_results
 from models import EvaluationData
-from transform import transform_evaluation_response
+from scoring import compute_total
+from transform import evaluation_to_csv_row
 from config import DEVELOPMENT_MODE
 
 logger = logging.getLogger(__name__)
@@ -85,21 +85,26 @@ def write_batch_csv(results: List[dict], output_path: str):
         print("No successful evaluations to write to CSV.")
         return
 
-    csv_rows = []
-    for result in successful_results:
-        row = transform_evaluation_response(
-            file_name=result["file_name"],
-            evaluation=result["evaluation"],
+    # Same row builder as the web export, so both CSVs share a schema and both
+    # actually identify the candidate.
+    csv_rows = [
+        evaluation_to_csv_row(
+            {
+                "candidate_name": r["candidate_name"],
+                "evaluation": r["evaluation"].model_dump()
+                if hasattr(r["evaluation"], "model_dump")
+                else r["evaluation"],
+                "resume_file": r["file_name"],
+                "resume_status": "matched",
+            }
         )
-        csv_rows.append(row)
-
+        for r in successful_results
+    ]
     if not csv_rows:
         return
 
-    fieldnames = list(csv_rows[0].keys())
-
     with open(output_path, "w", newline="", encoding="utf-8") as csvfile:
-        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer = csv.DictWriter(csvfile, fieldnames=list(csv_rows[0].keys()))
         writer.writeheader()
         writer.writerows(csv_rows)
 
@@ -125,14 +130,7 @@ def print_batch_summary(results: List[dict]):
         scored = []
         for r in successful:
             if r["evaluation"] and hasattr(r["evaluation"], "scores"):
-                scores = r["evaluation"].scores
-                total = (
-                    scores.motivation_fit.score
-                    + scores.collaboration_perspective.score
-                    + scores.values_judgment.score
-                    + scores.commitments_experience.score
-                )
-                scored.append((r["candidate_name"], total))
+                scored.append((r["candidate_name"], compute_total(r["evaluation"])))
 
         scored.sort(key=lambda x: x[1], reverse=True)
 

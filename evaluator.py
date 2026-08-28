@@ -6,9 +6,15 @@ import logging
 import json
 import re
 
-MAX_BONUS_POINTS = 20
-MIN_FINAL_SCORE = -20
-MAX_FINAL_SCORE = 120
+# One extra attempt when the model returns unparseable or invalid JSON. Small
+# models fail this way intermittently, and without a retry a single malformed
+# token permanently dropped an applicant from the results.
+MAX_PARSE_ATTEMPTS = 2
+
+RETRY_NUDGE = (
+    "Your previous response could not be parsed. Respond with ONLY the JSON "
+    "object described above -- no explanation, no markdown fence, no reasoning."
+)
 
 from prompt import (
     DEFAULT_MODEL,
@@ -44,46 +50,58 @@ class ResumeEvaluator:
         return criteria_template
 
     def evaluate_resume(self, resume_text: str) -> EvaluationData:
+        """Score one application, retrying once if the model's JSON is unusable.
+
+        Transport errors (connection dropped, timeout, 5xx) are retried inside
+        the provider; this retry covers the separate case of a reachable model
+        returning something that will not parse or validate.
+        """
         self._last_resume_text = resume_text
         full_prompt = self._load_evaluation_prompt(resume_text)
-        # logger.info(f"🔤 Evaluation prompt being sent: {full_prompt}")
-        try:
-            system_message = self.template_manager.render_template(
-                "resume_evaluation_system_message"
-            )
-            if system_message is None:
-                raise ValueError(
-                    "Failed to load resume evaluation system message template"
-                )
 
-            # Prepare chat parameters
-            chat_params = {
-                "model": self.model_name,
-                "messages": [
-                    {"role": "system", "content": system_message},
-                    {"role": "user", "content": full_prompt},
-                ],
-                "options": {
+        system_message = self.template_manager.render_template(
+            "resume_evaluation_system_message"
+        )
+        if system_message is None:
+            raise ValueError("Failed to load resume evaluation system message template")
+
+        last_error: Optional[Exception] = None
+        for attempt in range(1, MAX_PARSE_ATTEMPTS + 1):
+            messages = [
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": full_prompt},
+            ]
+            if attempt > 1:
+                messages.append({"role": "system", "content": RETRY_NUDGE})
+
+            response = self.provider.chat(
+                model=self.model_name,
+                messages=messages,
+                options={
                     "stream": False,
-                    "temperature": self.model_params.get("temperature", 0.5),
+                    "temperature": self.model_params.get("temperature", 0.1),
                     "top_p": self.model_params.get("top_p", 0.9),
                 },
-            }
+                format=EvaluationData.model_json_schema(),
+            )
 
-            # Add format parameter for structured output
-            kwargs = {"format": EvaluationData.model_json_schema()}
-            # Use the appropriate provider to make the API call
-            response = self.provider.chat(**chat_params, **kwargs)
+            raw = response["message"]["content"]
+            cleaned = extract_json_from_response(raw)
+            logger.debug("Evaluation response (attempt %s): %s", attempt, cleaned)
 
-            response_text = response["message"]["content"]
-            response_text = extract_json_from_response(response_text)
-            logger.error(f"🔤 Prompt response: {response_text}")
+            try:
+                return EvaluationData(**json.loads(cleaned))
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    "Evaluation response invalid on attempt %s/%s: %s",
+                    attempt,
+                    MAX_PARSE_ATTEMPTS,
+                    e,
+                )
+                if attempt == MAX_PARSE_ATTEMPTS:
+                    logger.error("Unparseable model output was: %r", raw[:500])
 
-            evaluation_dict = json.loads(response_text)
-            evaluation_data = EvaluationData(**evaluation_dict)
-
-            return evaluation_data
-
-        except Exception as e:
-            logger.error(f"Error evaluating resume: {str(e)}")
-            raise
+        raise ValueError(
+            f"Model returned unusable JSON after {MAX_PARSE_ATTEMPTS} attempts: {last_error}"
+        )

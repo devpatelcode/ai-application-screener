@@ -10,31 +10,54 @@ from models import OpenAICompatibleProvider
 logger = logging.getLogger(__name__)
 
 
+import re
+
+_FENCE_RE = re.compile(r"```(?:json|JSON)?\s*(.*?)```", re.DOTALL)
+
+
 def extract_json_from_response(response_text: str) -> str:
+    """Pull the JSON object out of whatever the model actually returned.
+
+    Small models wrap their output in unpredictable ways -- bare ``` fences,
+    a "Here is the JSON:" preamble, trailing pleasantries, or a reasoning block
+    that was cut off before its closing tag. The previous implementation only
+    handled an exact ```json prefix with a trailing fence and nothing else, so
+    most of those shapes caused the applicant to be dropped entirely.
+
+    Strategy: strip reasoning, prefer fenced content, then fall back to the
+    outermost brace pair -- the same salvage the PDF parser already used.
     """
-    Extract JSON content from markdown code blocks.
+    if not response_text:
+        return ""
 
-    Args:
-        response_text: Text that may contain JSON wrapped in markdown code blocks
+    text = response_text.strip()
 
-    Returns:
-        Text with markdown code block syntax removed
-    """
+    # Drop a <think> block whether or not it was closed. An unterminated block
+    # means the reasoning ran to the end, so there is no JSON after it anyway.
+    if "<think>" in text:
+        start = text.find("<think>")
+        end = text.find("</think>")
+        text = (
+            text[:start] + text[end + len("</think>") :] if end != -1 else text[:start]
+        ).strip()
 
-    response_text = response_text.strip()
-    if "<think>" in response_text:
-        think_start = response_text.find("<think>")
-        think_end = response_text.find("</think>")
-        if think_start != -1 and think_end != -1:
-            response_text = response_text[:think_start] + response_text[think_end + 8 :]
+    fenced = _FENCE_RE.search(text)
+    if fenced:
+        text = fenced.group(1).strip()
+    else:
+        # An unclosed fence: keep everything after the opening marker.
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json|JSON)?\s*", "", text)
+        if text.endswith("```"):
+            text = text[:-3].rstrip()
 
-    # Remove leading ```json if present
-    if response_text.startswith("```json"):
-        response_text = response_text[7:]
-    # Remove trailing ``` if present
-    if response_text.endswith("```"):
-        response_text = response_text[:-3]
-    return response_text
+    # Final salvage: take the outermost {...}, which discards any surrounding
+    # prose the model added before or after the object.
+    start, end = text.find("{"), text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        text = text[start : end + 1]
+
+    return text.strip()
 
 
 def initialize_llm_provider(model_name: str) -> Any:

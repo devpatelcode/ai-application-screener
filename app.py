@@ -1,40 +1,72 @@
-import os
+"""FastAPI front end for the application screener.
+
+This module is intentionally thin: it handles HTTP, file intake and job
+orchestration, and delegates the real work to focused modules --
+`intake` (parse the form, match resumes), `extraction` (read a resume of any
+format), `evaluator` (score it), `scoring` (one definition of the total) and
+`jobstore` (durable state).
+"""
+
 import json
-import uuid
+import logging
 import shutil
+import uuid
 import zipfile
-import re
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Optional
-from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from starlette.requests import Request
 from pydantic import BaseModel
+from starlette.requests import Request
 
-import csv as csv_mod
+import jobstore
+import preflight
+from config import provider_for
+from evaluator import ResumeEvaluator
+from extraction import extract_resume_text
+from intake import (
+    GPA_THRESHOLD,
+    RESUME_MATCHED,
+    RESUME_UNREADABLE,
+    Applicant,
+    IntakeError,
+    build_scoring_text,
+    load_applicants,
+)
+from prompt import DEFAULT_MODEL, MODEL_PARAMETERS
+from scoring import compute_total
+from transform import evaluation_to_csv_row
 
-from score import main as evaluate_single
-from batch import process_batch, write_batch_csv
-from models import EvaluationData
-from transform import transform_evaluation_response, convert_json_resume_to_text
-from pdf import PDFHandler
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger(__name__)
 
-GPA_THRESHOLD = 2.5
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    _startup()
+    yield
 
-app = FastAPI(title="Resume Screener")
+
+app = FastAPI(
+    title="Application Screener", lifespan=lifespan
+)
 
 UPLOAD_DIR = Path("uploads")
 OUTPUT_DIR = Path("output")
 UPLOAD_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
+jobstore.JOBS_DIR.mkdir(exist_ok=True)
 
 templates = Jinja2Templates(directory="templates")
-
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-jobs = {}
+ALLOWED_SUFFIXES = {".csv", ".zip"}
 
 
 class RubricConfig(BaseModel):
@@ -45,257 +77,166 @@ class RubricConfig(BaseModel):
     gpa_threshold: float = GPA_THRESHOLD
 
 
-class JobStatus(BaseModel):
-    job_id: str
-    status: str
-    total_files: int = 0
-    processed_files: int = 0
-    results: List[dict] = []
-    error: Optional[str] = None
+def _startup():
+    """Flag jobs that were mid-flight when the process last died.
 
-
-def _normalize_name(s: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
-
-
-def _find_column(fieldnames: List[str], keywords: List[str]) -> Optional[str]:
-    """Find the CSV header containing all given (lowercase) keywords."""
-    for fn in fieldnames or []:
-        low = fn.lower()
-        if all(k in low for k in keywords):
-            return fn
-    return None
-
-
-def _find_resume_for_name(name: str, resumes_dir: Optional[Path]) -> Optional[Path]:
-    """Fuzzy-match an applicant name against extracted resume filenames."""
-    if not resumes_dir or not name:
-        return None
-    resumes_dir = Path(resumes_dir)
-    if not resumes_dir.exists():
-        return None
-
-    target = _normalize_name(name)
-    if not target:
-        return None
-
-    pdf_files = [p for p in resumes_dir.rglob("*.pdf")]
-
-    for p in pdf_files:
-        stem_norm = _normalize_name(p.stem)
-        if stem_norm and (stem_norm == target or target in stem_norm or stem_norm in target):
-            return p
-
-    name_tokens = [t for t in re.split(r"\s+", name.lower()) if t]
-    if name_tokens:
-        for p in pdf_files:
-            fname_lower = p.stem.lower()
-            matches = sum(1 for t in name_tokens if t in fname_lower)
-            if matches >= max(1, len(name_tokens) - 1):
-                return p
-
-    return None
-
-
-def _parse_gpa(raw: str):
-    """Returns (float_or_None, status) with status in
-    eligible / below_gpa_threshold / gpa_unparseable."""
-    if not raw or not raw.strip():
-        return None, "gpa_unparseable"
-    match = re.search(r"\d+\.?\d*", raw)
-    if not match:
-        return None, "gpa_unparseable"
-    try:
-        value = float(match.group())
-    except ValueError:
-        return None, "gpa_unparseable"
-    if value < GPA_THRESHOLD:
-        return value, "below_gpa_threshold"
-    return value, "eligible"
-
-
-def process_google_forms_csv(file_path: str, resumes_dir: Optional[Path] = None):
-    """Yield one result dict per applicant row in a Google Forms export.
-
-    Combines each applicant's essay answers + commitments with their matched
-    resume (looked up by fuzzy name match against `resumes_dir`), then scores
-    the combination against the essay-based rubric.
+    Without this, a killed run stays 'processing' forever and the UI polls it
+    indefinitely -- which is what made a dead server look like a frozen bar.
     """
-    with open(file_path, "r", encoding="utf-8-sig") as f:
-        reader = csv_mod.DictReader(f)
-        fieldnames = reader.fieldnames or []
-        rows = list(reader)
+    stale = jobstore.mark_stale_jobs_interrupted()
+    if stale:
+        logger.warning("Marked %s interrupted job(s) from a previous run", stale)
 
-    if not rows:
+    try:
+        cfg = provider_for(DEFAULT_MODEL)
+        ctx = preflight.probe_context(cfg["base_url"], DEFAULT_MODEL)
+        if ctx.known:
+            logger.info(
+                "Model %s serving %s-token context (%s)",
+                DEFAULT_MODEL, ctx.context_length, ctx.source,
+            )
+            if ctx.context_length < 8192:
+                logger.warning(
+                    "Context window is only %s tokens. %s",
+                    ctx.context_length, preflight.remediation(8192),
+                )
+        else:
+            logger.info("Context window could not be probed (%s)", ctx.source)
+    except Exception as e:
+        logger.warning("Preflight context probe failed: %s", e)
+
+
+def _resume_text_for(applicant: Applicant, provider, model: str) -> None:
+    """Attach resume text, recording *why* it is missing when it is."""
+    if applicant.resume_status != RESUME_MATCHED or not applicant.resume_path:
+        return
+    result = extract_resume_text(
+        applicant.resume_path, provider=provider, vision_model=model
+    )
+    if result.ok:
+        applicant.resume_text = result.text
+    else:
+        applicant.resume_status = RESUME_UNREADABLE
+        applicant.resume_note = result.error or "Resume could not be read"
+        logger.warning(
+            "Resume unreadable for %s (%s): %s",
+            applicant.name, applicant.resume_path.name, applicant.resume_note,
+        )
+
+
+def _result_record(applicant: Applicant, evaluation=None, error=None) -> dict:
+    """Uniform result shape.
+
+    GPA and resume metadata are attached whether or not scoring succeeded, so a
+    failed row still carries everything a human reviewer needs.
+    """
+    return {
+        "candidate_name": applicant.name,
+        "email": applicant.email,
+        "year": applicant.year,
+        "gpa_raw": applicant.gpa_raw,
+        "gpa_value": applicant.gpa_value,
+        "gpa_status": applicant.gpa_status,
+        "resume_status": applicant.resume_status,
+        "resume_note": applicant.resume_note,
+        "resume_file": applicant.resume_path.name if applicant.resume_path else "",
+        "warnings": applicant.warnings,
+        "evaluation": evaluation.model_dump() if evaluation else None,
+        "total_score": compute_total(evaluation) if evaluation else 0.0,
+        "success": evaluation is not None,
+        "error": error,
+    }
+
+
+def process_job(job_id: str, csv_paths: List[str], resumes_dir: Optional[str] = None):
+    """Score every applicant, persisting after each one.
+
+    Setup that can fail (reading the CSV, constructing the evaluator) happens
+    before the loop and marks the job failed with a clear reason. Per-applicant
+    failures are isolated so one bad row never costs the rest of the batch.
+    """
+    state = jobstore.load(job_id) or jobstore.create(job_id, csv_paths, resumes_dir)
+    state["status"] = jobstore.STATUS_PROCESSING
+    state["error"] = None
+    jobstore.save(state)
+
+    try:
+        applicants: List[Applicant] = []
+        for csv_path in csv_paths:
+            applicants.extend(load_applicants(csv_path, resumes_dir))
+
+        model_params = MODEL_PARAMETERS.get(DEFAULT_MODEL)
+        evaluator = ResumeEvaluator(model_name=DEFAULT_MODEL, model_params=model_params)
+        provider = evaluator.provider
+    except IntakeError as e:
+        state.update(status=jobstore.STATUS_FAILED, error=str(e))
+        jobstore.save(state)
+        logger.error("Job %s could not start: %s", job_id, e)
+        return
+    except Exception as e:
+        state.update(
+            status=jobstore.STATUS_FAILED,
+            error=f"Could not initialize scoring: {e}",
+        )
+        jobstore.save(state)
+        logger.exception("Job %s failed during setup", job_id)
         return
 
-    name_col = _find_column(fieldnames, ["name"])
-    gpa_col = _find_column(fieldnames, ["gpa"])
-    commitments_col = _find_column(fieldnames, ["commitments"])
-    circumstances_col = _find_column(fieldnames, ["circumstances"])
-    why_col = _find_column(fieldnames, ["interested"]) or _find_column(
-        fieldnames, ["join"]
-    )
-    collab_col = _find_column(fieldnames, ["collaborated"])
-    values_col = _find_column(fieldnames, ["value that guides"]) or _find_column(
-        fieldnames, ["guides your decisions"]
-    )
+    already = jobstore.scored_names(state)
+    if already:
+        logger.info("Resuming job %s, skipping %s already-scored", job_id, len(already))
 
-    from evaluator import ResumeEvaluator
-    from prompt import DEFAULT_MODEL, MODEL_PARAMETERS
+    state["total_files"] = len(applicants)
+    jobstore.save(state)
 
-    model_params = MODEL_PARAMETERS.get(DEFAULT_MODEL)
-    evaluator = ResumeEvaluator(model_name=DEFAULT_MODEL, model_params=model_params)
-    pdf_handler = PDFHandler()
-
-    for row in rows:
-        name = (row.get(name_col) or "").strip() if name_col else ""
-        candidate_name = name or "Unknown Applicant"
+    for applicant in applicants:
+        if applicant.name in already:
+            continue
 
         try:
-            gpa_raw = (row.get(gpa_col) or "").strip() if gpa_col else ""
-            gpa_value, gpa_status = _parse_gpa(gpa_raw)
-
-            commitments = (row.get(commitments_col) or "").strip() if commitments_col else ""
-            circumstances = (
-                (row.get(circumstances_col) or "").strip() if circumstances_col else ""
-            )
-            why_text = (row.get(why_col) or "").strip() if why_col else ""
-            collab_text = (row.get(collab_col) or "").strip() if collab_col else ""
-            values_text = (row.get(values_col) or "").strip() if values_col else ""
-
-            resume_path = _find_resume_for_name(name, resumes_dir)
-            resume_text = ""
-            resume_matched = False
-            if resume_path:
-                try:
-                    resume_data = pdf_handler.extract_json_from_pdf(str(resume_path))
-                    if resume_data:
-                        resume_text = convert_json_resume_to_text(resume_data)
-                        resume_matched = True
-                except Exception:
-                    resume_text = ""
-
-            text_parts = [
-                f"Why interested essay:\n{why_text or 'Not provided'}",
-                f"\nCollaboration essay:\n{collab_text or 'Not provided'}",
-                f"\nValues essay:\n{values_text or 'Not provided'}",
-                f"\nCurrent commitments:\n{commitments or 'Not provided'}",
-            ]
-            if circumstances:
-                text_parts.append(f"\nCircumstances noted by applicant:\n{circumstances}")
-            if resume_text:
-                text_parts.append(f"\nResume:\n{resume_text}")
-
-            combined_text = "\n".join(text_parts)
-
-            evaluation = evaluator.evaluate_resume(combined_text)
-            if evaluation:
-                evaluation.gpa_status = gpa_status
-                evaluation.gpa_value = gpa_raw
-
-            yield {
-                "file_name": Path(file_path).name,
-                "candidate_name": candidate_name,
-                "evaluation": evaluation.model_dump() if evaluation else None,
-                "success": evaluation is not None,
-                "resume_matched": resume_matched,
-            }
+            _resume_text_for(applicant, provider, DEFAULT_MODEL)
+            text = build_scoring_text(applicant)
+            evaluation = evaluator.evaluate_resume(text)
+            record = _result_record(applicant, evaluation=evaluation)
+            state["succeeded"] = state.get("succeeded", 0) + 1
         except Exception as e:
-            yield {
-                "file_name": Path(file_path).name,
-                "candidate_name": candidate_name,
-                "evaluation": None,
-                "success": False,
-                "error": str(e),
-            }
+            logger.exception("Scoring failed for %s", applicant.name)
+            record = _result_record(applicant, error=str(e))
+            state["failed"] = state.get("failed", 0) + 1
 
+        state["results"].append(record)
+        state["processed_files"] = len(state["results"])
 
-def process_job(job_id: str, file_paths: List[str], resumes_dir: Optional[str] = None):
-    try:
-        jobs[job_id]["status"] = "processing"
-        results = []
+        if record["success"]:
+            jobstore.append_result_row(job_id, evaluation_to_csv_row(record))
 
-        # Google Forms CSVs expand into one result per applicant row, so total
-        # progress must count rows, not just uploaded files.
-        total_units = 0
-        for file_path in file_paths:
-            if Path(file_path).suffix.lower() == ".csv":
-                try:
-                    with open(file_path, "r", encoding="utf-8-sig") as f:
-                        total_units += sum(1 for _ in csv_mod.DictReader(f))
-                except Exception:
-                    pass
-            else:
-                total_units += 1
-        jobs[job_id]["total_files"] = total_units
+        # Persisted after every applicant: a crash here keeps everything above.
+        jobstore.save(state)
 
-        processed = 0
-        for file_path in file_paths:
-            ext = Path(file_path).suffix.lower()
+    # Rewrite in ranked order, then publish the export copy. Status flips to
+    # completed only after the CSV is on disk, so a client that polls and
+    # immediately downloads can never race a missing file.
+    ranked = sorted(
+        (r for r in state["results"] if r["success"]),
+        key=lambda r: (-r["total_score"], r["candidate_name"].lower()),
+    )
+    if ranked:
+        jobstore.rewrite_results_csv(
+            job_id, [evaluation_to_csv_row(r) for r in ranked]
+        )
+        try:
+            shutil.copyfile(
+                jobstore.results_csv_path(job_id), OUTPUT_DIR / f"{job_id}.csv"
+            )
+        except OSError as e:
+            logger.warning("Could not copy export for job %s: %s", job_id, e)
 
-            if ext == ".csv":
-                for candidate_result in process_google_forms_csv(file_path, resumes_dir):
-                    results.append(candidate_result)
-                    processed += 1
-                    jobs[job_id]["processed_files"] = processed
-                    jobs[job_id]["results"] = results
-                continue
-
-            try:
-                result = evaluate_single(file_path)
-                if result:
-                    results.append({
-                        "file_name": Path(file_path).name,
-                        "candidate_name": Path(file_path).stem,
-                        "evaluation": result.model_dump() if result else None,
-                        "success": True,
-                    })
-                else:
-                    results.append({
-                        "file_name": Path(file_path).name,
-                        "candidate_name": Path(file_path).stem,
-                        "evaluation": None,
-                        "success": False,
-                        "error": "Evaluation returned None",
-                    })
-            except Exception as e:
-                results.append({
-                    "file_name": Path(file_path).name,
-                    "candidate_name": Path(file_path).stem,
-                    "evaluation": None,
-                    "success": False,
-                    "error": str(e),
-                })
-
-            processed += 1
-            jobs[job_id]["processed_files"] = processed
-            jobs[job_id]["results"] = results
-
-        jobs[job_id]["status"] = "completed"
-
-        csv_path = OUTPUT_DIR / f"{job_id}.csv"
-        successful_results = [r for r in results if r.get("success") and r.get("evaluation")]
-        if successful_results:
-            csv_rows = []
-            for r in successful_results:
-                eval_data = EvaluationData(**r["evaluation"])
-                row = transform_evaluation_response(
-                    file_name=r["file_name"],
-                    evaluation=eval_data,
-                )
-                csv_rows.append(row)
-
-            if csv_rows:
-                with open(csv_path, "w", newline="", encoding="utf-8") as csvfile:
-                    fieldnames = list(csv_rows[0].keys())
-                    writer = csv_mod.DictWriter(csvfile, fieldnames=fieldnames)
-                    writer.writeheader()
-                    writer.writerows(csv_rows)
-
-    except Exception as e:
-        jobs[job_id]["status"] = "failed"
-        jobs[job_id]["error"] = str(e)
+    state["status"] = jobstore.STATUS_COMPLETED
+    jobstore.save(state)
+    logger.info(
+        "Job %s complete: %s scored, %s failed",
+        job_id, state.get("succeeded", 0), state.get("failed", 0),
+    )
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -304,100 +245,148 @@ async def home(request: Request):
 
 
 @app.post("/upload")
-async def upload_files(background_tasks: BackgroundTasks, files: List[UploadFile] = File(...)):
+async def upload_files(
+    background_tasks: BackgroundTasks, files: List[UploadFile] = File(...)
+):
     if not files:
         raise HTTPException(status_code=400, detail="No files uploaded")
 
     job_id = str(uuid.uuid4())[:8]
-    file_paths = []
-    zip_paths = []
+    csv_paths: List[str] = []
+    zip_paths: List[Path] = []
 
     for file in files:
-        ext = Path(file.filename).suffix.lower()
-        if ext not in (".pdf", ".csv", ".zip"):
+        suffix = Path(file.filename).suffix.lower()
+        if suffix not in ALLOWED_SUFFIXES:
             continue
-
-        file_path = UPLOAD_DIR / f"{job_id}_{Path(file.filename).name}"
-        with open(file_path, "wb") as buffer:
+        dest = UPLOAD_DIR / f"{job_id}_{Path(file.filename).name}"
+        with open(dest, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
+        (zip_paths if suffix == ".zip" else csv_paths).append(
+            dest if suffix == ".zip" else str(dest)
+        )
 
-        if ext == ".zip":
-            zip_paths.append(file_path)
-        else:
-            file_paths.append(str(file_path))
-
-    if not file_paths and not zip_paths:
-        raise HTTPException(status_code=400, detail="No valid PDF, CSV, or ZIP files uploaded")
-    if not file_paths:
+    if not csv_paths:
         raise HTTPException(
-            status_code=400, detail="A ZIP of resumes was uploaded without a CSV to match it against"
+            status_code=400,
+            detail=(
+                "Upload the Google Forms CSV export. A ZIP of resumes can be "
+                "included alongside it."
+            ),
         )
 
     resumes_dir: Optional[Path] = None
     if zip_paths:
         resumes_dir = UPLOAD_DIR / f"{job_id}_resumes"
         resumes_dir.mkdir(exist_ok=True)
+        root = resumes_dir.resolve()
         for zip_path in zip_paths:
-            with zipfile.ZipFile(zip_path) as zf:
-                for member in zf.namelist():
-                    member_path = (resumes_dir / member).resolve()
-                    if not str(member_path).startswith(str(resumes_dir.resolve())):
-                        continue  # guard against zip-slip path traversal
-                    zf.extract(member, resumes_dir)
+            try:
+                with zipfile.ZipFile(zip_path) as zf:
+                    for member in zf.namelist():
+                        target = (resumes_dir / member).resolve()
+                        if not str(target).startswith(str(root)):
+                            continue  # guard against zip-slip path traversal
+                        zf.extract(member, resumes_dir)
+            except zipfile.BadZipFile:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"'{zip_path.name}' is not a readable ZIP archive",
+                )
 
-    jobs[job_id] = {
-        "job_id": job_id,
-        "status": "queued",
-        "total_files": len(file_paths),
-        "processed_files": 0,
-        "results": [],
-        "file_paths": file_paths,
-        "resumes_dir": str(resumes_dir) if resumes_dir else None,
-    }
-
-    if background_tasks:
-        background_tasks.add_task(process_job, job_id, file_paths, resumes_dir)
-    else:
-        process_job(job_id, file_paths, resumes_dir)
-
-    return {"job_id": job_id, "total_files": len(file_paths)}
+    jobstore.create(job_id, csv_paths, str(resumes_dir) if resumes_dir else None)
+    background_tasks.add_task(process_job, job_id, csv_paths, resumes_dir)
+    return {"job_id": job_id}
 
 
 @app.get("/jobs/{job_id}")
 async def get_job_status(job_id: str):
-    if job_id not in jobs:
+    """Lightweight progress only.
+
+    The full results list is fetched separately, so a 1.5s poll does not
+    re-serialize every evaluation on every tick.
+    """
+    state = jobstore.load(job_id)
+    if not state:
         raise HTTPException(status_code=404, detail="Job not found")
-    return jobs[job_id]
+    return {
+        "job_id": job_id,
+        "status": state.get("status"),
+        "total_files": state.get("total_files", 0),
+        "processed_files": state.get("processed_files", 0),
+        "succeeded": state.get("succeeded", 0),
+        "failed": state.get("failed", 0),
+        "error": state.get("error"),
+    }
 
 
 @app.get("/results/{job_id}", response_class=HTMLResponse)
 async def results_page(request: Request, job_id: str):
-    if job_id not in jobs:
+    if not jobstore.load(job_id):
         raise HTTPException(status_code=404, detail="Job not found")
-    return templates.TemplateResponse("results.html", {"request": request, "job_id": job_id, "job": jobs[job_id]})
+    return templates.TemplateResponse(
+        "results.html", {"request": request, "job_id": job_id}
+    )
 
 
 @app.get("/results/{job_id}/data")
 async def results_data(job_id: str):
-    if job_id not in jobs:
+    state = jobstore.load(job_id)
+    if not state:
         raise HTTPException(status_code=404, detail="Job not found")
-    return jobs[job_id]
+    return state
 
 
 @app.get("/export/{job_id}")
 async def export_csv(job_id: str):
-    if job_id not in jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
+    """Serve the results CSV straight from disk.
 
-    csv_path = OUTPUT_DIR / f"{job_id}.csv"
-    if not csv_path.exists():
-        raise HTTPException(status_code=404, detail="CSV not found")
-
-    return FileResponse(
-        csv_path,
-        media_type="text/csv",
-        filename=f"evaluations_{job_id}.csv",
+    Deliberately does not require an in-memory job, so exports remain
+    downloadable after a restart.
+    """
+    for candidate in (jobstore.results_csv_path(job_id), OUTPUT_DIR / f"{job_id}.csv"):
+        if candidate.exists():
+            return FileResponse(
+                candidate,
+                media_type="text/csv",
+                filename=f"evaluations_{job_id}.csv",
+            )
+    raise HTTPException(
+        status_code=404, detail="No results have been written for this job yet"
     )
+
+
+@app.get("/jobs")
+async def list_jobs():
+    return {
+        "jobs": [
+            {
+                "job_id": s.get("job_id"),
+                "status": s.get("status"),
+                "processed_files": s.get("processed_files", 0),
+                "total_files": s.get("total_files", 0),
+                "created_at": s.get("created_at"),
+            }
+            for s in jobstore.list_jobs()
+        ]
+    }
+
+
+@app.post("/jobs/{job_id}/resume")
+async def resume_job(job_id: str, background_tasks: BackgroundTasks):
+    """Restart an interrupted job, skipping applicants already scored."""
+    state = jobstore.load(job_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if state.get("status") == jobstore.STATUS_PROCESSING:
+        raise HTTPException(status_code=409, detail="Job is already running")
+
+    resumes_dir = state.get("resumes_dir")
+    background_tasks.add_task(
+        process_job, job_id, state.get("file_paths", []),
+        Path(resumes_dir) if resumes_dir else None,
+    )
+    return {"job_id": job_id, "status": "resuming"}
 
 
 @app.get("/rubric", response_class=HTMLResponse)
@@ -409,11 +398,9 @@ async def rubric_page(request: Request):
 async def save_rubric_preset(preset_name: str, config: RubricConfig):
     presets_dir = Path("rubric_presets")
     presets_dir.mkdir(exist_ok=True)
-
-    preset_path = presets_dir / f"{preset_name}.json"
-    with open(preset_path, "w") as f:
-        json.dump(config.model_dump(), f)
-
+    (presets_dir / f"{preset_name}.json").write_text(
+        json.dumps(config.model_dump()), encoding="utf-8"
+    )
     return {"message": f"Preset '{preset_name}' saved"}
 
 
@@ -422,25 +409,18 @@ async def list_rubric_presets():
     presets_dir = Path("rubric_presets")
     if not presets_dir.exists():
         return {"presets": []}
-
-    presets = [f.stem for f in presets_dir.glob("*.json")]
-    return {"presets": presets}
+    return {"presets": [f.stem for f in presets_dir.glob("*.json")]}
 
 
 @app.get("/rubric/preset/{preset_name}")
 async def load_rubric_preset(preset_name: str):
-    presets_dir = Path("rubric_presets")
-    preset_path = presets_dir / f"{preset_name}.json"
-
+    preset_path = Path("rubric_presets") / f"{preset_name}.json"
     if not preset_path.exists():
         raise HTTPException(status_code=404, detail="Preset not found")
-
-    with open(preset_path) as f:
-        config = json.load(f)
-
-    return config
+    return json.loads(preset_path.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)

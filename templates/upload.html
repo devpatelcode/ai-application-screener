@@ -197,28 +197,51 @@
         });
     }
 
+    var pollErrors = 0;
+
     function pollJob(jobId) {
         fetch('/jobs/' + jobId).then(function(resp) {
-            if (!resp.ok) throw new Error('Poll failed');
+            if (!resp.ok) throw new Error('server returned ' + resp.status);
             return resp.json();
         }).then(function(job) {
+            pollErrors = 0;
             var pct = job.total_files > 0 ? Math.round(job.processed_files / job.total_files * 100) : 0;
-            progressFill.style.width = pct + '%';
-            progressText.textContent = job.processed_files + ' / ' + job.total_files + ' files done';
+            progressFill.style.width = Math.min(pct, 100) + '%';
+            progressText.textContent = job.processed_files + ' / ' + job.total_files +
+                ' applicants scored' + (job.failed ? ' (' + job.failed + ' failed)' : '');
 
             if (job.status === 'completed') {
                 stepProcessing.style.display = 'none';
                 stepResults.style.display = 'block';
-                var ok = job.results.filter(function(r) { return r.success; }).length;
-                resultSummary.textContent = 'Screened ' + ok + ' of ' + job.total_files + ' candidates.';
+                resultSummary.textContent = 'Scored ' + (job.succeeded || 0) +
+                    ' of ' + job.total_files + ' applicants.';
                 viewResultsBtn.href = '/results/' + jobId;
                 downloadCsvBtn.href = '/export/' + jobId;
             } else if (job.status === 'failed') {
-                showError('Processing failed: ' + (job.error || 'Unknown error'));
+                showError(job.error || 'Processing failed.');
+            } else if (job.status === 'interrupted') {
+                // Partial work is preserved on disk, so point at it rather than
+                // discarding the run.
+                showError(
+                    (job.error || 'Processing was interrupted.') +
+                    ' ' + (job.processed_files || 0) + ' applicant(s) were saved — ' +
+                    'view partial results at /results/' + jobId
+                );
             } else {
-                setTimeout(function() { pollJob(jobId); }, 1500);
+                setTimeout(function() { pollJob(jobId); }, 2000);
             }
-        }).catch(function() {
+        }).catch(function(err) {
+            // Give up after a few failures instead of spinning forever against
+            // a server that is no longer running.
+            pollErrors += 1;
+            if (pollErrors >= 4) {
+                showError(
+                    'Lost contact with the server (' + err.message + '). ' +
+                    'Applicants scored so far were saved to disk — restart the app ' +
+                    'and open /results/' + jobId + ' to see them.'
+                );
+                return;
+            }
             setTimeout(function() { pollJob(jobId); }, 3000);
         });
     }

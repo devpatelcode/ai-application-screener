@@ -1,5 +1,5 @@
 from typing import List, Optional, Dict, Tuple, Any, Protocol, runtime_checkable
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 @runtime_checkable
@@ -207,10 +207,31 @@ class JSONResume(BaseModel):
     projects: Optional[List[Project]] = None
 
 
+CATEGORY_MAX = 25
+
+
 class CategoryScore(BaseModel):
+    """One rubric category. Scores are clamped rather than rejected.
+
+    A model that hallucinates `{"score": 999, "max": 25}` used to validate and
+    rank first; clamping keeps that row usable instead of discarding the whole
+    applicant over one bad number.
+    """
+
     score: float = Field(ge=0, description="Score achieved in this category")
     max: int = Field(gt=0, description="Maximum possible score")
     evidence: str = Field(min_length=1, description="Evidence supporting the score")
+
+    @field_validator("max")
+    @classmethod
+    def _normalize_max(cls, v: int) -> int:
+        return CATEGORY_MAX
+
+    @model_validator(mode="after")
+    def _clamp_score(self):
+        if self.score > self.max:
+            self.score = float(self.max)
+        return self
 
 
 class Scores(BaseModel):
@@ -220,32 +241,17 @@ class Scores(BaseModel):
     commitments_experience: CategoryScore
 
 
-class BonusPoints(BaseModel):
-    total: float = Field(ge=0, le=20, description="Total bonus points")
-    breakdown: str = Field(description="Breakdown of bonus points")
-
-
-class Deductions(BaseModel):
-    total: float = Field(
-        ge=0,
-        description="Total deduction points (stored as positive, applied as negative)",
-    )
-    reasons: str = Field(description="Reasons for deductions")
-
-
 class EvaluationData(BaseModel):
+    """Exactly what the model is asked to produce -- nothing more.
+
+    GPA and resume metadata are deliberately absent: they are decided by app
+    code, and including them here only forced the model to emit dead tokens
+    that were immediately overwritten.
+    """
+
     scores: Scores
-    bonus_points: BonusPoints
-    deductions: Deductions
-    key_strengths: List[str] = Field(min_items=1, max_items=5)
-    areas_for_improvement: List[str] = Field(min_items=1, max_items=5)
-    gpa_status: str = Field(
-        default="eligible",
-        description="One of: eligible, below_gpa_threshold, gpa_unparseable",
-    )
-    gpa_value: Optional[str] = Field(
-        default=None, description="Raw GPA string as submitted on the application"
-    )
+    key_strengths: List[str] = Field(min_length=1, max_length=5)
+    areas_for_improvement: List[str] = Field(min_length=1, max_length=3)
 
 
 class OpenAICompatibleProvider:
@@ -279,8 +285,16 @@ class OpenAICompatibleProvider:
         import time
         import random
 
+        import logging
+
+        log = logging.getLogger(__name__)
+
         options = options or {}
-        body: Dict[str, Any] = {"model": model, "messages": messages, "stream": False}
+
+        # extra_body is applied first so provider config can supply defaults but
+        # can never clobber the fields this method sets deliberately below.
+        body: Dict[str, Any] = dict(self.extra_body)
+        body.update({"model": model, "messages": messages, "stream": False})
         if "temperature" in options:
             body["temperature"] = options["temperature"]
         if "top_p" in options:
@@ -297,8 +311,6 @@ class OpenAICompatibleProvider:
             elif self.structured_output == "json_object":
                 body["response_format"] = {"type": "json_object"}
 
-        body.update(self.extra_body)
-
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
@@ -306,27 +318,73 @@ class OpenAICompatibleProvider:
         url = f"{self.base_url}/chat/completions"
 
         MAX_RETRIES = 5
-        BASE_DELAY = 10.0  # seconds — base for exponential backoff
-        MAX_DELAY = 120.0  # cap so we never wait more than 2 minutes
-        for attempt in range(MAX_RETRIES):
-            response = requests.post(url, json=body, headers=headers, timeout=300)
+        BASE_DELAY = 2.0  # seconds — base for exponential backoff
+        MAX_DELAY = 60.0  # cap so we never wait more than a minute
 
-            if response.status_code == 429 and attempt < MAX_RETRIES - 1:
-                retry_after = response.headers.get("Retry-After")
-                exp_delay = min(BASE_DELAY * (2 ** attempt), MAX_DELAY)
-                delay = float(retry_after) if retry_after else exp_delay
-                sleep_time = round(delay * random.uniform(0.8, 1.2), 2)
-                print(
-                    f"[OpenAICompatibleProvider] Rate limit hit "
-                    f"(attempt {attempt + 1}/{MAX_RETRIES}). Retrying in {sleep_time}s..."
+        def _backoff(attempt: int, retry_after: Optional[str] = None) -> float:
+            delay = min(BASE_DELAY * (2 ** attempt), MAX_DELAY)
+            if retry_after:
+                # RFC 7231 allows an HTTP-date here, which is not a float.
+                try:
+                    delay = min(float(retry_after), MAX_DELAY)
+                except (TypeError, ValueError):
+                    pass
+            return round(delay * random.uniform(0.8, 1.2), 2)
+
+        last_error: Optional[Exception] = None
+        for attempt in range(MAX_RETRIES):
+            is_last = attempt == MAX_RETRIES - 1
+            try:
+                # (connect, read): fail fast when the server is down, stay
+                # patient while a local model is generating.
+                response = requests.post(
+                    url, json=body, headers=headers, timeout=(10, 300)
                 )
-                time.sleep(sleep_time)
+            except (requests.ConnectionError, requests.Timeout) as e:
+                # The dominant failure mode for a local Ollama backend: the
+                # server restarts or a long generation stalls. Previously fatal
+                # on the first occurrence, which killed the whole job.
+                last_error = e
+                if is_last:
+                    break
+                wait = _backoff(attempt)
+                log.warning(
+                    "LLM request failed (%s), retrying in %.1fs [%s/%s]",
+                    type(e).__name__, wait, attempt + 1, MAX_RETRIES,
+                )
+                time.sleep(wait)
+                continue
+
+            # 429 (rate limit) and 5xx (server hiccup) are both transient.
+            if response.status_code == 429 or response.status_code >= 500:
+                last_error = requests.HTTPError(
+                    f"HTTP {response.status_code} from {url}", response=response
+                )
+                if is_last:
+                    break
+                wait = _backoff(attempt, response.headers.get("Retry-After"))
+                log.warning(
+                    "LLM returned HTTP %s, retrying in %.1fs [%s/%s]",
+                    response.status_code, wait, attempt + 1, MAX_RETRIES,
+                )
+                time.sleep(wait)
                 continue
 
             response.raise_for_status()
-            data = response.json()
+
+            try:
+                data = response.json()
+            except ValueError as e:
+                raise ValueError(
+                    f"Non-JSON response from {url}: {response.text[:300]!r}"
+                ) from e
+
             try:
                 content = data["choices"][0]["message"]["content"]
             except (KeyError, IndexError, TypeError):
                 raise ValueError(f"Unexpected response shape from {url}: {data}")
             return {"message": {"role": "assistant", "content": content}}
+
+        raise RuntimeError(
+            f"LLM request to {url} failed after {MAX_RETRIES} attempts: {last_error}"
+        ) from last_error
