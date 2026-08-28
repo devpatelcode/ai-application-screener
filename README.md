@@ -53,7 +53,7 @@ pip install -r requirements.txt
 
 ```bash
 OLLAMA_CONTEXT_LENGTH=32768 ollama serve   # required, not optional
-ollama pull gemma3:4b                      # the default model
+ollama pull gemma3:12b                     # the default model (~8GB)
 ```
 
 Per-request `num_ctx` does **not** override this — it must be set when the server
@@ -61,7 +61,7 @@ starts. The app probes the real window on startup, logs it, and warns loudly if
 it is too small, so you never have to take this on faith:
 
 ```
-Model gemma3:4b serving 32768-token context (ollama:/api/ps)
+Model gemma3:12b serving 32768-token context (ollama:/api/ps)
 ```
 
 Verify independently with `curl -s http://localhost:11434/api/ps`.
@@ -132,12 +132,35 @@ cp .env.example .env
 
 | Variable | Values | Description |
 |----------|--------|-------------|
-| `DEFAULT_MODEL` | `gemma3:4b` | Model name; must exist in `providers.json` |
+| `DEFAULT_MODEL` | `gemma3:12b` | Model name; must exist in `providers.json`. `gemma3:4b` is ~4x faster but scores far less discriminatingly (see below) |
 | `OLLAMA_CONTEXT_LENGTH` | `32768` | **Set on the Ollama server**, not the app. Too small = silent truncation = wrong scores |
 | `GEMINI_API_KEY` | — | Only needed if you select a `gemini-*` model |
 
 Applicant data (`uploads/`, `output/`, `jobs/`) is gitignored — it contains real
 names, emails, phone numbers, GPAs, essays and resumes. Keep it that way.
+
+### Why `gemma3:12b` and not `gemma3:4b`
+
+Both models were run over the same 45-applicant pool under identical conditions:
+
+| | `gemma3:4b` | `gemma3:12b` |
+|---|---|---|
+| Distinct scores across 45 applicants | 17 | **26** |
+| Applicants sitting in a tie group | 87% | **62%** |
+| Largest single tie | 10 people | **6 people** |
+| Score spread (stdev) | 5.8 | **14.5** |
+| Range used | 67–91 | **39–96** |
+| Seconds per applicant | ~13 | ~57 |
+
+Rank correlation between the two is **0.62** — they produce genuinely different
+orderings, not the same ordering rescaled. Spot-checking the disagreements against
+the rubric showed the 4b was the one getting it wrong, in both directions: it gave
+22/25 for motivation to an essay whose only concrete reason was something seen on
+the club's social media, and 18/25 for values to an applicant with strong, direct
+evidence of acting on the value they named.
+
+The 4b compresses everyone into 67–91, which cannot support a cut decision. Use it
+only for smoke-testing the pipeline; use the 12b for real review.
 
 ---
 
