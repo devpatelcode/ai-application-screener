@@ -34,8 +34,8 @@ flagged for manual review instead of auto-failing).
 ### Setup
 
 ```bash
-git clone <your-repo-url>
-cd hiring-agent
+git clone https://github.com/devpatelcode/ai-application-screener.git
+cd ai-application-screener
 
 python -m venv .venv
 source .venv/bin/activate  # Linux/macOS
@@ -235,6 +235,14 @@ persistence model touches exactly one file.
 
 ---
 
+## Credits
+
+Built on [HackerRank's open-source hiring-agent](https://github.com/interviewstreet/hiring-agent)
+(MIT), which provided the original resume-scoring CLI and LLM provider layer. This project
+adapts it for club recruiting: the FastAPI web app, Google Forms CSV + resume ZIP intake,
+the four-category application rubric, multi-format resume extraction, resumable job state,
+the context-window preflight, and the model benchmark above.
+
 ## License
 
-MIT
+MIT. See [LICENSE](LICENSE); the original HackerRank copyright notice is retained.
